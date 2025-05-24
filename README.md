@@ -23,15 +23,14 @@ def parse_feature_file(file_path):
             if line.startswith(("Given", "When", "Then", "And")):
                 if temp_step and temp_data:
                     steps.extend(substitute_step(temp_step, temp_data))
-                    temp_step = None
-                    temp_data = []
+                elif temp_step:
+                    steps.append(temp_step)
                 temp_step = line
+                temp_data = []
             elif line.startswith("|"):
                 temp_data.append([item.strip() for item in line.strip("|").split("|")])
             else:
-                if temp_step and not temp_data:
-                    steps.append(temp_step)
-                    temp_step = None
+                continue
 
         if temp_step and temp_data:
             steps.extend(substitute_step(temp_step, temp_data))
