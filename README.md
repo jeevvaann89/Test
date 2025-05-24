@@ -1,79 +1,99 @@
+import asyncio
 import os
-import re
+import sys
+from dataclasses import dataclass
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from dotenv import load_dotenv
+load_dotenv()
 
-def parse_feature_file(file_path):
-    with open(file_path, 'r') as file:
-        content = file.read()
+# Third-party imports
+import gradio as gr
+from langchain_openai import AzureChatOpenAI
+from rich.console import Console
+from rich.panel import Panel
+from rich.text import Text
 
-    feature_match = re.search(r'Feature: (.*)', content)
-    feature_name = feature_match.group(1).strip() if feature_match else None
+# Local module imports
+from browser_use import Agent
 
-    scenario_blocks = re.split(r'Scenario:', content)[1:]
-    scenarios = []
+@dataclass
+class ActionResult:
+    is_done: bool
+    extracted_content: str | None
+    error: str | None
+    include_in_memory: bool
 
-    for block in scenario_blocks:
-        lines = block.strip().splitlines()
-        scenario_name = lines[0].strip()
-        steps = []
-        temp_step = None
-        temp_data = []
+@dataclass
+class AgentHistoryList:
+    all_results: list[ActionResult]
+    all_model_outputs: list[dict]
 
-        for line in lines[1:]:
-            line = line.strip()
-            if line.startswith(("Given", "When", "Then", "And")):
-                if temp_step and temp_data:
-                    steps.extend(substitute_step(temp_step, temp_data))
-                elif temp_step:
-                    steps.append(temp_step)
-                temp_step = line
-                temp_data = []
-            elif line.startswith("|"):
-                temp_data.append([item.strip() for item in line.strip("|").split("|")])
-            else:
-                continue
+def parse_agent_history(history_str: str) -> None:
+    console = Console()
+    # Split the content into sections based on ActionResult entries
+    sections = history_str.split('ActionResult(')
+    for i, section in enumerate(sections[1:], 1):  # Skip first empty section
+        # Extract relevant information
+        content = ''
+        if 'extracted_content=' in section:
+            content = section.split('extracted_content=')[1].split(',')[0].strip("'")
+        if content:
+            header = Text(f'Step {i}', style='bold blue')
+            panel = Panel(content, title=header, border_style='blue')
+            console.print(panel)
+            console.print()
 
-        if temp_step and temp_data:
-            steps.extend(substitute_step(temp_step, temp_data))
-        elif temp_step:
-            steps.append(temp_step)
+async def run_browser_task(
+    task: str,
+    azure_api_key: str,
+    azure_endpoint: str,
+    model: str = 'gpt-35-turbo',
+    headless: bool = True,
+) -> str:
+    if not azure_api_key.strip() or not azure_endpoint.strip():
+        return 'Please provide Azure API key and endpoint'
 
-        scenarios.append({"name": scenario_name, "steps": steps})
+    os.environ['AZURE_OPENAI_API_KEY'] = azure_api_key
+    os.environ['AZURE_OPENAI_ENDPOINT'] = azure_endpoint
 
-    return feature_name, scenarios
+    try:
+        agent = Agent(
+            task=task,
+            llm=AzureChatOpenAI(
+                model=model,
+            ),
+        )
+        result = await agent.run()
+        # TODO: The result cloud be parsed better
+        return result
+    except Exception as e:
+        return f'Error: {str(e)}'
 
-def substitute_step(step, data):
-    headers = data[0]
-    rows = data[1:]
-    steps = []
+def create_ui():
+    with gr.Blocks(title='Browser Use GUI') as interface:
+        gr.Markdown('# Browser Use Task Automation')
+        with gr.Row():
+            with gr.Column():
+                azure_api_key = gr.Textbox(label='Azure OpenAI API Key', placeholder='...', type='password')
+                azure_endpoint = gr.Textbox(label='Azure OpenAI Endpoint', placeholder='https://...',)
+                task = gr.Textbox(
+                    label='Task Description',
+                    placeholder='E.g., Find flights from New York to London for next week',
+                    lines=3,
+                )
+                model = gr.Dropdown(choices=['gpt-35-turbo'], label='Model', value='gpt-35-turbo')
+                headless = gr.Checkbox(label='Run Headless', value=True)
+                submit_btn = gr.Button('Run Task')
+            with gr.Column():
+                output = gr.Textbox(label='Output', lines=10, interactive=False)
 
-    for row in rows:
-        step_text = step
-        data_dict = dict(zip(headers, row))
-        for key, value in data_dict.items():
-            step_text = re.sub(rf'"{key}"|\<{key}\>', value, step_text)
-        steps.append(step_text)
+        submit_btn.click(
+            fn=lambda *args: asyncio.run(run_browser_task(*args)),
+            inputs=[task, azure_api_key, azure_endpoint, model, headless],
+            outputs=output,
+        )
+    return interface
 
-    return steps
-
-def read_feature_files(folder_path):
-    feature_files = []
-
-    for file_name in os.listdir(folder_path):
-        if file_name.endswith(".feature"):
-            file_path = os.path.join(folder_path, file_name)
-            feature_name, scenarios = parse_feature_file(file_path)
-            feature_files.append((file_name, feature_name, scenarios))
-
-    return feature_files
-
-folder_path = 'features'
-feature_files = read_feature_files(folder_path)
-
-for file_name, feature_name, scenarios in feature_files:
-    print(f"File: {file_name}")
-    print(f"Feature: {feature_name}")
-    for scenario in scenarios:
-        print(f" Scenario: {scenario['name']}")
-        for step in scenario["steps"]:
-            print(f" {step}")
-    print("------------------------")
+if __name__ == '__main__':
+    demo = create_ui()
+    demo.launch()
