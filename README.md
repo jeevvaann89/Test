@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sys
+import json
 from dataclasses import dataclass
 
 from browser_use.browser.context import BrowserContextConfig
@@ -27,6 +28,8 @@ class ActionResult:
     extracted_content: str | None
     error: str | None
     include_in_memory: bool
+    screenshot_base64: str | None = None
+
 
 @dataclass
 class AgentHistoryList:
@@ -61,12 +64,6 @@ async def run_browser_task(
     os.environ['AZURE_OPENAI_API_KEY'] = azure_api_key
     os.environ['AZURE_OPENAI_ENDPOINT'] = azure_endpoint
 
-    browser_session = BrowserSession(
-        browser_profile=BrowserProfile(
-            trace_path=r'C:\\Users\\jeevan\\OneDrive\\Documents\\book\\python\\BrowserUse\\traces',
-            save_recording_path=r'C:\\Users\\jeevan\\OneDrive\\Documents\\book\\python\\BrowserUse\\recording'
-        )
-    )
     try:
         if file:
             # Process the uploaded file
@@ -84,11 +81,38 @@ async def run_browser_task(
             ),
             use_vision=False,
             validate_output=True,
-            browser_session=browser_session
+
         )
-        result = await agent.run(max_steps=5)
-        # TODO: The result cloud be parsed better
-        return result
+        history: AgentHistoryList = await agent.run(max_steps=5)
+        # --- Diagnostic Print Statements ---
+        print(f"Type of history object: {type(history)}")
+        print(f"Attributes of history object: {dir(history)}")
+        # --- End Diagnostic Print Statements ---
+
+        # Extract screenshots from history
+        screenshots_base64 = []
+        if history and hasattr(history, 'all_model_outputs') and history.all_model_outputs:  # Added hasattr check
+            for output_entry in history.all_model_outputs:
+                # Assuming screenshots are stored under a key like 'screenshot_base64'
+                # and are already in data URI format (e.g., 'data:image/png;base64,...')
+                if 'screenshot_base64' in output_entry and output_entry['screenshot_base64']:
+                    screenshots_base64.append(output_entry['screenshot_base64'])
+                # If ActionResult itself had a screenshot field, you'd check history.all_results too
+                for result_entry in history.all_results:
+                    if result_entry.screenshot_base64:
+                        screenshots_base64.append(result_entry.screenshot_base64)
+
+        # Convert history object to a readable string for the Textbox output
+        # Use json.dumps for pretty printing the JSON representation of the history
+        # history.model_dump_json() returns a JSON string, so we parse it then dump it for pretty print
+        # Added a check for model_dump_json() existence
+        if hasattr(history, 'model_dump_json'):
+            history_dict = json.loads(history.model_dump_json())
+            output_text = f"Agent History:\n{json.dumps(history_dict, indent=2)}"
+        else:
+            output_text = f"Agent History (raw): {history}"  # Fallback if not a Pydantic model
+
+        return output_text, screenshots_base64
     except Exception as e:
         return f'Error: {str(e)}'
 
@@ -110,12 +134,14 @@ def create_ui():
                 submit_btn = gr.Button('Run Task')
             with gr.Column():
                 output = gr.Textbox(label='Output', lines=10, interactive=False)
+                screenshot_gallery = gr.Gallery(label='Screenshots')
                 submit_btn.click(
                     fn=lambda *args: asyncio.run(run_browser_task(*args)),
                     inputs=[task, azure_api_key, azure_endpoint, model, headless, file_upload],
-                    outputs=output,
+                    outputs=[output, screenshot_gallery],
                 )
     return interface
+
 
 if __name__ == '__main__':
     demo = create_ui()
