@@ -171,8 +171,9 @@ async def run_browser_task(
         task: str,
         azure_api_key: str,
         azure_endpoint: str,
-        model: str = 'gpt-35-turbo',
+        model: str = 'gpt-4-vision-preview',  # Default to vision model
         headless: bool = True,
+        max_steps: int = 5,  # Added max_steps parameter with a default value
         file: gr.File | None = None,  # Gradio File component provides a named temporary file
 ) -> str:  # This function now returns a JSON string of the AgentHistory
     """
@@ -184,6 +185,7 @@ async def run_browser_task(
         azure_endpoint (str): Azure OpenAI endpoint URL.
         model (str): The OpenAI model to use (e.g., 'gpt-35-turbo').
         headless (bool): Whether to run the browser in headless mode.
+        max_steps (int): The maximum number of steps the agent should run.
         file (gr.File | None): An uploaded file object from Gradio.
 
     Returns:
@@ -204,6 +206,9 @@ async def run_browser_task(
                 file_content = f.read()
             task_description += "\n\nFile Content:\n" + file_content
 
+        # Determine if vision capabilities should be used based on the selected model
+        use_vision_model = (model == 'gpt-4-vision-preview')
+
         # Initialize the Agent with the task and LLM configuration
         agent = Agent(
             task=task_description,
@@ -211,14 +216,14 @@ async def run_browser_task(
                 model=model,
                 api_version='2024-12-01-preview'  # Specify API version
             ),
-            use_vision=False,  # Set to True if vision capabilities are desired and configured
+            use_vision=use_vision_model,  # Dynamically set use_vision based on model selection
             validate_output=True,
             # Pass browser context config if needed, e.g.:
             # browser_context_config=BrowserContextConfig(headless=headless)
         )
 
-        # Run the agent for a maximum of 5 steps
-        history: AgentHistory = await agent.run(max_steps=5)
+        # Run the agent for a maximum of 'max_steps'
+        history: AgentHistory = await agent.run(max_steps=max_steps)  # Pass max_steps here
 
         # Convert the Pydantic AgentHistory model to a JSON string
         if history and hasattr(history, 'model_dump_json'):
@@ -238,6 +243,22 @@ def create_unified_gui():
     """
     Creates the unified Gradio Blocks interface with Home and Agent Report tabs.
     """
+    # Removed image loading and Base64 encoding logic
+    # tcs_logo_path = "TCSimage.png"
+    # tcs_logo_base64 = ""
+
+    # if os.path.exists(tcs_logo_path):
+    #     try:
+    #         with open(tcs_logo_path, "rb") as f:
+    #             image_bytes = f.read()
+    #         tcs_logo_base64 = base64.b64encode(image_bytes).decode('utf-8')
+    #     except Exception as e:
+    #         print(f"Error encoding TCS image to Base64: {e}")
+    #         tcs_logo_base64 = ""
+    # else:
+    #     print(f"Warning: TCS image not found at {tcs_logo_path}.")
+    #     tcs_logo_base64 = ""
+
     with gr.Blocks(title='TCS QES Browser Automation') as interface:
         # A hidden Gradio State component to store the agent history JSON output
         # This allows data to be passed between different UI interactions.
@@ -246,21 +267,32 @@ def create_unified_gui():
         # Use gr.Tabs for navigation between the "Home" and "Agent Report" sections
         with gr.Tabs() as tabs:
             with gr.TabItem("Home", id="home_tab"):
+
                 gr.Markdown('# TCS QES Browser Automation')
-                gr.Markdown("Configure your Azure OpenAI credentials and define a browser automation task.")
+                gr.Markdown("Configure LLM Configuration and define a browser automation task.")
 
                 with gr.Row():
                     with gr.Column():
-                        # Input fields for Azure OpenAI configuration and task
-                        azure_api_key = gr.Textbox(label='Azure OpenAI API Key', placeholder='...', type='password')
-                        azure_endpoint = gr.Textbox(label='Azure OpenAI Endpoint', placeholder='https://...', )
+                        # Group API Key, Endpoint, and Model under a collapsible Accordion
+                        with gr.Accordion("LLM Configuration", open=False):
+                            azure_api_key = gr.Textbox(label='Azure OpenAI API Key', placeholder='...', type='password')
+                            azure_endpoint = gr.Textbox(label='Azure OpenAI Endpoint', placeholder='https://...', )
+                            model = gr.Dropdown(choices=['gpt-35-turbo', 'gpt-4-vision-preview'], label='Model',
+                                                value='gpt-4-vision-preview')
+
+                        # Added Browser Settings accordion
+                        with gr.Accordion("Browser Settings", open=False):
+                            with gr.Row():
+                                headless = gr.Checkbox(label='Run Headless', value=True, scale=1)
+                                max_steps = gr.Number(label='Max Steps', value=5, precision=0, minimum=1, scale=1)
+
+                        # Other task-related inputs
                         task = gr.Textbox(
                             label='Task Description',
                             placeholder='E.g., Find flights from New York to London for next week',
                             lines=3,
                         )
-                        model = gr.Dropdown(choices=['gpt-35-turbo'], label='Model', value='gpt-35-turbo')
-                        headless = gr.Checkbox(label='Run Headless', value=True)
+
                         file_upload = gr.File(label='Upload File (Optional)')
 
                         # Buttons for running the task and viewing the report
@@ -277,7 +309,8 @@ def create_unified_gui():
                 run_task_btn.click(
                     # Call the asynchronous run_browser_task function
                     fn=lambda *args: asyncio.run(run_browser_task(*args)),
-                    inputs=[task, azure_api_key, azure_endpoint, model, headless, file_upload],
+                    inputs=[task, azure_api_key, azure_endpoint, model, headless, max_steps, file_upload],
+                    # Added max_steps here
                     outputs=[task_output_status],  # The raw JSON output goes to task_output_status
                 ).success(
                     # This .success() method is chained. It runs only if the previous function (run_browser_task)
