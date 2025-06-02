@@ -2,25 +2,24 @@ import asyncio
 import os
 import sys
 import json
-from dataclasses import dataclass
+
 from typing import Any, Optional, List, Tuple
 from pydantic import BaseModel, Field
 import base64
 from io import BytesIO
 from PIL import Image
 
-# Add the parent directory to the system path to allow imports from browser_use
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from dotenv import load_dotenv
 
-load_dotenv()  # Load environment variables from .env file
+load_dotenv()
 
 import gradio as gr
 from langchain_openai import AzureChatOpenAI
-
+from browser_use import Agent as BrowserUseAgent, BrowserProfile, BrowserSession
 # Import agno components for Gherkin generation
-from agno.agent import Agent
+from agno.agent import Agent as AgnoAgent
 from agno.models.azure import AzureOpenAI
 from agno.tools.reasoning import ReasoningTools
 from textwrap import dedent
@@ -78,12 +77,9 @@ class AgentHistory(BaseModel):
     history: List[AgentHistoryEntry]
 
 
-# --- Agent History Processing Function for Report View ---
+
 def process_agent_history_json(json_string: str) -> Tuple[str, List[Image.Image]]:
-    """
-    Parses the agent history JSON string, formats it into a human-readable Markdown summary,
-    and extracts PIL Image objects from base64-encoded screenshots.
-    """
+
     text_summary_lines: List[str] = []
     images: List[Image.Image] = []
 
@@ -169,7 +165,7 @@ async def run_browser_task(
 
         use_vision_model = (model == 'gpt-4-vision-preview')
 
-        agent = Agent(
+        agent = BrowserUseAgent(
             task=task_description,
             llm=AzureChatOpenAI(
                 model=model,
@@ -213,7 +209,7 @@ async def generate_gherkin_scenario(
 
     try:
         # Define the agno Agent for Gherkin generation
-        gherkhin_agent = Agent(
+        gherkhin_agent = AgnoAgent(
             model=AzureOpenAI(
                 api_key=gherkin_api_key,
                 azure_endpoint=gherkin_endpoint, # Use the gherkin_endpoint parameter directly
@@ -263,7 +259,6 @@ async def generate_gherkin_scenario(
                 **IMPORTANT:** Your final output MUST be ONLY the markdown code block containing the Gherkin feature file content. Do not include any other text, explanations, or tool calls before or after the code block.
             """),
             expected_output=dedent("""\
-            ```gherkin
             Feature: [Clear and Concise Feature Description aligned with User Story]
 
             @tag1 @tag2
@@ -293,15 +288,12 @@ async def generate_gherkin_scenario(
                 # Include columns for all placeholders in steps and relevant expected data
 
             # Include scenarios/scenario outlines for positive, negative, edge, and boundary cases
-            # derived from the manual test cases.
-
-            # @jira-id-[number] # Optional: Add traceability tag
-            ```
+            # derived from the manual test cases.           
             Return ONLY the markdown code block containing the Gherkin feature file content.
             """),
         )
         response =  gherkhin_agent.run(full_input_text)
-        return  response.content # CORRECTED: Removed 'await' here
+        return  response.content 
     except Exception as e:
         return f"Error generating Gherkin: {str(e)}"
 
@@ -442,7 +434,6 @@ def create_unified_gui():
 
 # --- Main execution block ---
 if __name__ == '__main__':
-    # Create the unified Gradio interface
+    # Create the unified Gradio
     demo = create_unified_gui()
-    # Launch the Gradio application
     demo.launch()
