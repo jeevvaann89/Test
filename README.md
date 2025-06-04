@@ -219,3 +219,21 @@ def process_agent_history_json(json_string: str) -> Tuple[str, List[Image.Image]
 
 if __name__ == '__main__':
     process_agent_history_json(str)
+
+
+    ==========================================================
+
+    @self.registry.action("Verify text {text} is present on the page")
+async def verify_text_presence(text: str, browser: BrowserContext):
+    page_text = await browser.page.content()
+    if text in page_text:
+        return ActionResult(
+            extracted_content=f"Text '{text}' is present on the page",
+            success=True
+        )
+    else:
+        return ActionResult(
+            extracted_content=f"Text '{text}' is not present on the page",
+            success=False
+        )
+
