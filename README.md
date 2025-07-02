@@ -14,10 +14,11 @@ from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple, Union, Callable
-
+from browser_logger import get_browser_loggernew
 import httpx
 import nest_asyncio
 
+import browser_logger
 from dommutationchanger import subscribe, unsubscribe
 from js_helper import get_js_with_element_finder
 
@@ -407,6 +408,479 @@ class PlaywrightBrowserManager:
         # else:
         #     print(f"Tab {tab_index} does not exist")
 
+    async def press_key_combinationnew(self,
+            key_combination: Annotated[str, "key to press, e.g., Enter, PageDown etc"],
+    ) -> str:
+        logger.info(f"Executing press_key_combination with key combo: {key_combination}")
+        # Create and use the PlaywrightManager
+
+        page = await self.get_current_page()
+
+        if page is None:  # type: ignore
+            raise ValueError("No active page found. OpenURL command opens a new page.")
+
+        # Split the key combination if it's a combination of keys
+        keys = key_combination.split("+")
+
+        dom_changes_detected = None
+
+        def detect_dom_changes(changes: str):  # type: ignore
+            nonlocal dom_changes_detected
+            dom_changes_detected = changes  # type: ignore
+
+        subscribe(detect_dom_changes)
+        # If it's a combination, hold down the modifier keys
+        for key in keys[:-1]:  # All keys except the last one are considered modifier keys
+            await page.keyboard.down(key)
+
+        # Press the last key in the combination
+        await page.keyboard.press(keys[-1])
+
+        # Release the modifier keys
+        for key in keys[:-1]:
+            await page.keyboard.up(key)
+        await asyncio.sleep(300)  # sleep for 100ms to allow the mutation observer to detect changes
+        unsubscribe(detect_dom_changes)
+
+        await self.wait_for_load_state_if_enabled(page=page)
+
+        await self.take_screenshots("press_key_combination_end", page)
+        if dom_changes_detected:
+            return f"Key {key_combination} executed successfully.\n As a consequence of this action, new elements have appeared in view:{dom_changes_detected}. This means that the action is not yet executed and needs further interaction. Get all_fields DOM to complete the interaction."
+
+        return f"Key {key_combination} executed successfully"
+
+
+
+    async def custom_fill_elementnew(self,page: Page, selector: str, text_to_enter: str) -> None:
+        selector = f"{selector}"  # Ensures the selector is treated as a string
+        try:
+            js_code = """(inputParams) => {
+                /*INJECT_FIND_ELEMENT_IN_SHADOW_DOM*/
+                const selector = inputParams.selector;
+                let text_to_enter = inputParams.text_to_enter.trim();
+
+                // Start by searching in the regular document (DOM)
+                const element = findElementInShadowDOMAndIframes(document, selector);
+
+                if (!element) {
+                    throw new Error(`Element not found: ${selector}`);
+                }
+
+                // Set the value for the element
+                element.value = "";
+                element.value = text_to_enter;
+                element.dispatchEvent(new Event('input', { bubbles: true }));
+                element.dispatchEvent(new Event('change', { bubbles: true }));
+
+                return `Value set for ${selector}`;
+            }"""
+
+            result = await page.evaluate(
+                get_js_with_element_finder(js_code),
+                {"selector": selector, "text_to_enter": text_to_enter},
+            )
+            logger.debug(f"custom_fill_element result: {result}")
+        except Exception as e:
+
+            traceback.print_exc()
+            logger.error(f"Error in custom_fill_element, Selector: {selector}, Text: {text_to_enter}. Error: {str(e)}")
+            raise
+
+    async def do_entertextnew(self,page: Page, selector: str, text_to_enter: str, use_keyboard_fill: bool = True) -> dict[
+        str, str]:
+        try:
+            logger.debug(f"Looking for selector {selector} to enter text: {text_to_enter}")
+
+
+            elem = await self.find_element(selector, page, element_name="entertext")
+
+            # Initialize selector logger with proof path
+            selector_logger = get_browser_loggernew(get_global_conf().get_proof_path())
+
+            if not elem:
+                # Log failed selector interaction
+                await selector_logger.log_selector_interaction(
+                    tool_name="entertext",
+                    selector=selector,
+                    action="input",
+                    selector_type="css" if "md=" in selector else "custom",
+                    success=False,
+                    error_message=f"Error: Selector {selector} not found. Unable to continue.",
+                )
+                error = f"Error: Selector {selector} not found. Unable to continue."
+                return {"summary_message": error, "detailed_message": error}
+            else:
+                # Get element properties to determine the best selection strategy
+                tag_name = await elem.evaluate("el => el.tagName.toLowerCase()")
+                element_role = await elem.evaluate("el => el.getAttribute('role') || ''")
+                element_type = await elem.evaluate("el => el.type || ''")
+                input_roles = ["combobox", "listbox", "dropdown", "spinner", "select"]
+                input_types = [
+                    "range",
+                    "combobox",
+                    "listbox",
+                    "dropdown",
+                    "spinner",
+                    "select",
+                    "option",
+                ]
+                logger.info(f"element_role: {element_role}, element_type: {element_type}")
+                if element_role in input_roles or element_type in input_types:
+                    properties = {
+                        "tag_name": tag_name,
+                        "element_role": element_role,
+                        "element_type": element_type,
+                        "element_outer_html": await self.get_element_outer_html(elem, page),
+                        "alternative_selectors": await selector_logger.get_alternative_selectors(elem, page),
+                        "element_attributes": await selector_logger.get_element_attributes(elem),
+                        "selector_logger": selector_logger,
+                    }
+                    return await self.interact_with_element_select_type(page, elem, selector, text_to_enter, properties)
+
+            logger.info(f"Found selector {selector} to enter text")
+            element_outer_html = await self.get_element_outer_html(elem, page)
+
+            # Initialize selector logger with proof path
+            selector_logger = get_browser_loggernew(get_global_conf().get_proof_path())
+            # Get alternative selectors and element attributes for logging
+            alternative_selectors = await selector_logger.get_alternative_selectors(elem, page)
+            element_attributes = await selector_logger.get_element_attributes(elem)
+
+            if use_keyboard_fill:
+                await elem.focus()
+                await asyncio.sleep(0.01)
+                await self.press_key_combinationnew("Control+A")
+                await asyncio.sleep(0.01)
+                await self.press_key_combinationnew("Delete")
+                await asyncio.sleep(0.01)
+                logger.debug(f"Focused element with selector {selector} to enter text")
+                await page.keyboard.type(text_to_enter, delay=1)
+            else:
+                await self.custom_fill_element(page, selector, text_to_enter)
+
+            await elem.focus()
+            await self.wait_for_load_state_if_enabled(page=page)
+
+            # Log successful selector interaction
+            await selector_logger.log_selector_interaction(
+                tool_name="entertext",
+                selector=selector,
+                action="input",
+                selector_type="css" if "md=" in selector else "custom",
+                alternative_selectors=alternative_selectors,
+                element_attributes=element_attributes,
+                success=True,
+                additional_data={
+                    "text_entered": text_to_enter,
+                    "input_method": "keyboard" if use_keyboard_fill else "javascript",
+                },
+            )
+
+            logger.info(f'Success. Text "{text_to_enter}" set successfully in the element with selector {selector}')
+            success_msg = f'Success. Text "{text_to_enter}" set successfully in the element with selector {selector}'
+            return {
+                "summary_message": success_msg,
+                "detailed_message": f"{success_msg} and outer HTML: {element_outer_html}.",
+            }
+
+        except Exception as e:
+
+            traceback.print_exc()
+            # Initialize selector logger with proof path
+            selector_logger = get_browser_loggernew(get_global_conf().get_proof_path())
+            # Log failed selector interaction
+            await selector_logger.log_selector_interaction(
+                tool_name="entertext",
+                selector=selector,
+                action="input",
+                selector_type="css" if "md=" in selector else "custom",
+                success=False,
+                error_message=str(e),
+            )
+
+            traceback.print_exc()
+            error = f"Error entering text in selector {selector}."
+            return {"summary_message": error, "detailed_message": f"{error} Error: {e}"}
+
+    async def entertextnew(self,
+            entry: Annotated[
+                tuple[str, str],
+                "tuple containing 'selector' and 'value_to_fill' in ('selector', 'value_to_fill') format, selector is md attribute value of the dom element to interact, md is an ID and 'value_to_fill' is the value or text of the option to select",
+            ],
+    ) -> Annotated[str, "Text entry result"]:
+
+        logger.info(f"Entering text: {entry}")
+
+        selector: str = entry[0]
+        text_to_enter: str = entry[1]
+
+        # if "md=" not in selector:
+        #     selector = f"[md='{selector}']"
+
+        # Create and use the PlaywrightManager
+        page = await self.get_current_page()
+        # await page.route("**/*", block_ads)
+        if page is None:  # type: ignore
+            return "Error: No active page found. OpenURL command opens a new page."
+
+        function_name = inspect.currentframe().f_code.co_name  # type: ignore
+
+        await self.take_screenshots(f"{function_name}_start", page)
+
+        # await browser_manager.highlight_element(selector)
+
+        dom_changes_detected = None
+
+        def detect_dom_changes(changes: str):  # type: ignore
+            nonlocal dom_changes_detected
+            dom_changes_detected = changes  # type: ignore
+
+        subscribe(detect_dom_changes)
+
+        await page.evaluate(
+            get_js_with_element_finder(
+                """
+            (selector) => {
+                /*INJECT_FIND_ELEMENT_IN_SHADOW_DOM*/
+                const element = findElementInShadowDOMAndIframes(document, selector);
+                if (element) {
+                    element.value = '';
+                } else {
+                    console.error('Element not found:', selector);
+                }
+            }
+            """
+            ),
+            selector,
+        )
+
+        result = await self.do_entertextnew(page, selector, text_to_enter)
+        await asyncio.sleep(
+            300)  # sleep to allow the mutation observer to detect changes
+        unsubscribe(detect_dom_changes)
+
+        await self.wait_for_load_state_if_enabled(page=page)
+
+        await self.take_screenshots(f"{function_name}_end", page)
+
+        if dom_changes_detected:
+            return f"{result['detailed_message']}.\n As a consequence of this action, new elements have appeared in view: {dom_changes_detected}. This means that the action of entering text {text_to_enter} is not yet executed and needs further interaction. Get all_fields DOM to complete the interaction."
+        return result["detailed_message"]
+
+
+
+
+    async def perform_javascript_click(
+            self, page: Page, selector: str, type_of_click: str
+    ) -> str:
+        js_code = """(params) => {
+            /*INJECT_FIND_ELEMENT_IN_SHADOW_DOM*/
+            const selector = params[0];
+            const type_of_click = params[1];
+
+            let element = findElementInShadowDOMAndIframes(document, selector);
+            if (!element) {
+                console.log(`perform_javascript_click: Element with selector ${selector} not found`);
+                return `perform_javascript_click: Element with selector ${selector} not found`;
+            }
+
+            if (element.tagName.toLowerCase() === "a") {
+                element.target = "_self";
+            }
+
+            let ariaExpandedBeforeClick = element.getAttribute('aria-expanded');
+
+            // Get the element's bounding rectangle for mouse events
+            const rect = element.getBoundingClientRect();
+            const centerX = rect.left + rect.width / 2;
+            const centerY = rect.top + rect.height / 2;
+
+            // Check if we're in Salesforce
+            const isSalesforce = window.location.href.includes('lightning/') || 
+                                window.location.href.includes('force.com') || 
+                                document.querySelector('.slds-dropdown, lightning-base-combobox') !== null;
+
+            // Check if element is SVG or SVG child
+            const isSvgElement = element.tagName.toLowerCase() === 'svg' || 
+                                element.ownerSVGElement !== null ||
+                                element.namespaceURI === 'http://www.w3.org/2000/svg';
+
+            // Common mouse move event
+            const mouseMove = new MouseEvent('mousemove', {
+                bubbles: true,
+                cancelable: true,
+                clientX: centerX,
+                clientY: centerY,
+                view: window
+            });
+            element.dispatchEvent(mouseMove);
+
+            // Handle different click types
+            switch(type_of_click) {
+                case 'right_click':
+                    const contextMenuEvent = new MouseEvent('contextmenu', {
+                        bubbles: true,
+                        cancelable: true,
+                        clientX: centerX,
+                        clientY: centerY,
+                        button: 2,
+                        view: window
+                    });
+                    element.dispatchEvent(contextMenuEvent);
+                    break;
+
+                case 'double_click':
+                    const dblClickEvent = new MouseEvent('dblclick', {
+                        bubbles: true,
+                        cancelable: true,
+                        clientX: centerX,
+                        clientY: centerY,
+                        button: 0,
+                        view: window
+                    });
+                    element.dispatchEvent(dblClickEvent);
+                    break;
+
+                case 'middle_click':
+                    const middleClickEvent = new MouseEvent('click', {
+                        bubbles: true,
+                        cancelable: true,
+                        button: 1,
+                        view: window
+                    });
+                    element.dispatchEvent(middleClickEvent);
+                    break;
+
+                default: // normal click
+                    // For SVG elements or Salesforce, use event sequence approach
+                    if (isSvgElement || isSalesforce) {
+                        // SVG elements need full event sequence
+                        // Create and dispatch mousedown event first
+                        const mouseDown = new MouseEvent('mousedown', {
+                            bubbles: true,
+                            cancelable: true,
+                            view: window,
+                            clientX: centerX,
+                            clientY: centerY,
+                            button: 0
+                        });
+                        element.dispatchEvent(mouseDown);
+
+                        const mouseUpEvent = new MouseEvent('mouseup', {
+                            bubbles: true,
+                            cancelable: true,
+                            clientX: centerX,
+                            clientY: centerY,
+                            button: 0,
+                            view: window
+                        });
+                        element.dispatchEvent(mouseUpEvent);
+
+                        const clickEvent = new MouseEvent('click', {
+                            bubbles: true,
+                            cancelable: true,
+                            clientX: centerX,
+                            clientY: centerY,
+                            button: 0,
+                            view: window
+                        });
+                        element.dispatchEvent(clickEvent);
+                    } else {
+                        // For regular HTML elements, try direct click first, fallback to event sequence
+                        try {
+                            // Try the native click method first
+                            element.click();
+                        } catch (error) {
+                            console.log('Native click failed, using event sequence');
+                            // Fallback to event sequence
+                            const mouseDown = new MouseEvent('mousedown', {
+                                bubbles: true,
+                                cancelable: true,
+                                view: window,
+                                clientX: centerX,
+                                clientY: centerY,
+                                button: 0
+                            });
+                            element.dispatchEvent(mouseDown);
+
+                            const mouseUpEvent = new MouseEvent('mouseup', {
+                                bubbles: true,
+                                cancelable: true,
+                                clientX: centerX,
+                                clientY: centerY,
+                                button: 0,
+                                view: window
+                            });
+                            element.dispatchEvent(mouseUpEvent);
+
+                            const clickEvent = new MouseEvent('click', {
+                                bubbles: true,
+                                cancelable: true,
+                                clientX: centerX,
+                                clientY: centerY,
+                                button: 0,
+                                view: window
+                            });
+                            element.dispatchEvent(clickEvent);
+
+                            // If it's a link and click wasn't prevented, handle navigation
+                            if (element.tagName.toLowerCase() === 'a' && element.href) {
+                                window.location.href = element.href;
+                            }
+                        }
+                    }
+                    break;
+            }
+
+            const ariaExpandedAfterClick = element.getAttribute('aria-expanded');
+            if (ariaExpandedBeforeClick === 'false' && ariaExpandedAfterClick === 'true') {
+                return "Executed " + type_of_click + " on element with selector: " + selector + 
+                    ". Very important: As a consequence, a menu has appeared where you may need to make further selection. " +
+                    "Very important: Get all_fields DOM to complete the action." + " The click is best effort, so verify the outcome.";
+            }
+            return "Executed " + type_of_click + " on element with selector: " + selector + " The click is best effort, so verify the outcome.";
+        }"""
+
+        try:
+            logger.info(
+                f"Executing JavaScript '{type_of_click}' on element with selector: {selector}"
+            )
+            result: str = await page.evaluate(
+                get_js_with_element_finder(js_code), (selector, type_of_click)
+            )
+            logger.debug(
+                f"Executed JavaScript '{type_of_click}' on element with selector: {selector}"
+            )
+            return result
+        except Exception as e:
+
+            traceback.print_exc()
+            logger.error(
+                f"Error executing JavaScript '{type_of_click}' on element with selector: {selector}. Error: {e}"
+            )
+            traceback.print_exc()
+            return f"Error executing JavaScript '{type_of_click}' on element with selector: {selector}"
+
+    async def is_element_present(
+            self, selector: str, page: Optional[Page] = None
+    ) -> bool:
+        """Check if an element is present in DOM/Shadow DOM/iframes."""
+        if page is None:
+            page = await self.get_current_page()
+
+        # Try regular DOM first
+        element = await page.query_selector(selector)
+        if element:
+            return True
+
+        # Check Shadow DOM and iframes
+        js_code = """(selector) => {
+            /*INJECT_FIND_ELEMENT_IN_SHADOW_DOM*/
+            return findElementInShadowDOMAndIframes(document, selector) !== null;
+        }"""
+
+        return await page.evaluate_handle(get_js_with_element_finder(js_code), selector)
 
     async def ensure_browser_context(self) -> None:
         if self._browser_context is None:
@@ -1081,29 +1555,29 @@ class PlaywrightBrowserManager:
         # Simply return the detailed message
         return result["detailed_message"]
 
-    async def do_select_option(self, selector: str, option_value: str) -> dict[str, str]:
+    async def do_select_option(self,page:Page, selector: str, option_value: str) -> dict[str, str]:
         """
         Simplified approach to select an option in a dropdown using the element's properties.
         Uses find_element to get the element and then determines the best strategy based on
         the element's role, type, and tag name.
         """
         try:
-            page = await self.get_current_page()
-            logger.debug(f"Looking for selector {selector} to select option: {option_value}")
+            # page = await self.get_current_page()
+            logger.info(f"Looking for selector {selector} to select option: {option_value}")
 
             # Part 1: Find the element and get its properties
             element, properties = await self.find_element_select_type(page, selector)
             if not element:
                 error = f"Error: Selector '{selector}' not found. Unable to continue."
                 return {"summary_message": error, "detailed_message": error}
-
+            logger.info(f"Looking for selector {element} to select option: {properties}")
             # Part 2: Interact with the element to select the option
             return await self.interact_with_element_select_type(page, element, selector, option_value, properties)
 
         except Exception as e:
 
             traceback.print_exc()
-            selector_logger = get_browser_logger(get_global_conf().get_proof_path())
+            selector_logger = get_browser_loggernew(get_global_conf().get_proof_path())
             await selector_logger.log_selector_interaction(
                 tool_name="select_option",
                 selector=selector,
@@ -1116,17 +1590,15 @@ class PlaywrightBrowserManager:
             error = f"Error selecting option in selector '{selector}'."
             return {"summary_message": error, "detailed_message": f"{error} Error: {e}"}
 
-    async def find_element_select_type(self, selector: str) -> tuple[Optional[ElementHandle], dict]:
+    async def find_element_select_type(self, page: Page,selector: str) -> tuple[Optional[ElementHandle], dict]:
         """
         Internal function to find the element and gather its properties.
         Returns the element and a dictionary of its properties.
         """
-
-        page = await self.get_current_page()
         element = await self.find_element(selector, page, element_name="select_option")
 
         if not element:
-            selector_logger = get_browser_logger(get_global_conf().get_proof_path())
+            selector_logger = get_browser_loggernew(get_global_conf().get_proof_path())
             await selector_logger.log_selector_interaction(
                 tool_name="select_option",
                 selector=selector,
@@ -1138,7 +1610,7 @@ class PlaywrightBrowserManager:
             return None, {}
 
         logger.info(f"Found selector '{selector}' to select option")
-        selector_logger = get_browser_logger(get_global_conf().get_proof_path())
+        selector_logger = get_browser_loggernew(get_global_conf().get_proof_path())
         alternative_selectors = await selector_logger.get_alternative_selectors(element, page)
         element_attributes = await selector_logger.get_element_attributes(element)
 
@@ -1160,54 +1632,471 @@ class PlaywrightBrowserManager:
 
         return element, properties
 
-    async def interact_with_element_select_type(
+    async def get_latest_screenshot_stream(self) -> Optional[BytesIO]:
+        if not self._latest_screenshot_bytes:
+            # Take a new screenshot if none exists
+            page = await self.get_current_page()
+            await self.take_screenshots("latest_screenshot", page)
+
+        if self._latest_screenshot_bytes:
+            return BytesIO(self._latest_screenshot_bytes)
+        else:
+            logger.warning("Failed to take screenshot.")
+            return None
+
+
+    async def _capture_element_with_bbox(
             self,
             element: ElementHandle,
+            page: Page,
             selector: str,
+            element_name: Optional[str] = None,
+    ) -> None:
+        """Capture screenshot with bounding box and metadata overlay."""
+        try:
+            # Get element's bounding box
+            bbox = await element.bounding_box()
+            if not bbox:
+                return
+
+            # Get element's accessibility info
+            accessibility_info = await element.evaluate(
+                """element => {
+                return {
+                    ariaLabel: element.getAttribute('aria-label'),
+                    role: element.getAttribute('role'),
+                    name: element.getAttribute('name'),
+                    title: element.getAttribute('title')
+                }
+            }"""
+            )
+
+            # Use the first non-empty value from accessibility info
+            element_identifier = next(
+                (
+                    val
+                    for val in [
+                    accessibility_info.get("ariaLabel"),
+                    accessibility_info.get("role"),
+                    accessibility_info.get("name"),
+                    accessibility_info.get("title"),
+                ]
+                    if val
+                ),
+                "element",  # default if no accessibility info found
+            )
+
+            # Construct screenshot name
+            screenshot_name = f"{element_identifier}_{element_name or selector}_bbox_{int(datetime.now().timestamp())}"
+
+            # Take screenshot using existing method
+            await self.take_screenshots(
+                name=screenshot_name,
+                page=page,
+                full_page=True,
+                include_timestamp=False,
+            )
+
+            # Get the latest screenshot using get_latest_screenshot_stream
+            screenshot_stream = await self.get_latest_screenshot_stream()
+            if not screenshot_stream:
+                logger.error("Failed to get screenshot for bounding box overlay")
+                return
+
+            image = Image.open(screenshot_stream)
+            draw = ImageDraw.Draw(image)
+
+            # Draw bounding box
+            draw.line(
+                [
+                    (bbox["x"], bbox["y"]),
+                    (bbox["x"] + bbox["width"], bbox["y"] + bbox["height"]),
+                ],
+                width=4,
+            )
+
+            # Prepare metadata text
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            url = page.url
+            test_name = self.stake_id or "default"
+            element_info = f"Element: {element_identifier} by {element_name}"
+
+            # Create metadata text block with word wrapping
+            metadata = [
+                f"Timestamp: {current_time}",
+                f"URL: {url}",
+                f"Test: {test_name}",
+                element_info,
+            ]
+
+            # Calculate text position and size
+            try:
+                font = ImageFont.truetype("Arial", 14)
+            except Exception as e:
+                logger.error(f"Failed to load font: {e}")
+                font = ImageFont.load_default()
+
+            # Increase text padding by 10%
+            text_padding = 11  # Original 10 + 10%
+            line_height = 22  # Original 20 + 10%
+
+            # Calculate text dimensions with word wrapping
+            max_width = min(
+                image.width * 0.4, 400
+            )  # Reduced from 500px to 400px for better wrapping
+            wrapped_lines = []
+
+            for text in metadata:
+                if text.startswith("URL: "):
+                    # Special handling for URLs - break into chunks
+                    url_prefix = "URL: "
+                    url_text = text[len(url_prefix):]
+                    current_line = url_prefix
+
+                    # Break URL into segments of reasonable length
+                    segment_length = (
+                        40  # Adjust this value to control URL segment length
+                    )
+                    start = 0
+                    while start < len(url_text):
+                        end = start + segment_length
+                        if end < len(url_text):
+                            # Look for a good breaking point
+                            break_chars = ["/", "?", "&", "-", "_", "."]
+                            for char in break_chars:
+                                pos = url_text[start: end + 10].find(char)
+                                if pos != -1:
+                                    end = start + pos + 1
+                                    break
+                        else:
+                            end = len(url_text)
+
+                        segment = url_text[start:end]
+                        if start == 0:
+                            wrapped_lines.append(url_prefix + segment)
+                        else:
+                            wrapped_lines.append(" " * len(url_prefix) + segment)
+                        start = end
+                else:
+                    # Normal text wrapping for non-URL lines
+                    words = text.split()
+                    current_line = words[0]
+                    for word in words[1:]:
+                        test_line = current_line + " " + word
+                        test_width = draw.textlength(test_line, font=font)
+                        if test_width <= max_width:
+                            current_line = test_line
+                        else:
+                            wrapped_lines.append(current_line)
+                            current_line = word
+                    wrapped_lines.append(current_line)
+
+            # Calculate background dimensions with some extra padding
+            bg_width = max_width + (text_padding * 2)
+            bg_height = (line_height * len(wrapped_lines)) + (text_padding * 2)
+
+            # Draw background rectangle for metadata
+            bg_x = image.width - bg_width - text_padding
+            bg_y = text_padding
+
+            # Draw semi-transparent background
+            bg_color = (0, 0, 0, 128)
+            bg_layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
+            bg_draw = ImageDraw.Draw(bg_layer)
+            bg_draw.rectangle(
+                [bg_x, bg_y, bg_x + bg_width, bg_y + bg_height], fill=bg_color
+            )
+
+            # Composite the background onto the main image
+            image = Image.alpha_composite(image.convert("RGBA"), bg_layer)
+            draw = ImageDraw.Draw(image)
+
+            # Draw wrapped text
+            current_y = bg_y + text_padding
+            for line in wrapped_lines:
+                draw.text(
+                    (bg_x + text_padding, current_y), line, fill="white", font=font
+                )
+                current_y += line_height
+
+            # Save the modified screenshot
+            screenshot_path = os.path.join(
+                self.get_screenshots_dir(), f"{screenshot_name}.png"
+            )
+
+            # Convert back to RGB before saving as PNG
+            image = image.convert("RGB")
+            image.save(screenshot_path, "PNG")
+
+            logger.debug(f"Saved bounding box screenshot: {screenshot_path}")
+
+            # Get browser logger instance
+            browser_logger = get_browser_loggernew(self.get_screenshots_dir())
+
+            # Get element attributes and alternative selectors for logging
+            element_attributes = await browser_logger.get_element_attributes(element)
+            alternative_selectors = await browser_logger.get_alternative_selectors(
+                element, page
+            )
+
+            # Log the screenshot interaction
+            await browser_logger.log_browser_interaction(
+                tool_name="find_element",
+                action="capture_bounding_box_screenshot",
+                interaction_type="screenshot",
+                selector=selector,
+                selector_type="custom",
+                alternative_selectors=alternative_selectors,
+                element_attributes=element_attributes,
+                success=True,
+                additional_data={
+                    "screenshot_name": f"{screenshot_name}.png",
+                    "screenshot_path": screenshot_path,
+                    "element_identifier": element_identifier,
+                    "bounding_box": bbox,
+                    "url": url,
+                    "timestamp": current_time,
+                    "test_name": test_name,
+                    "element_name": element_name,
+                },
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to capture element with bounding box: {e}")
+            traceback.print_exc()
+
+            # Log failure in browser logger
+            browser_logger = get_browser_loggernew(self.get_screenshots_dir())
+            await browser_logger.log_browser_interaction(
+                tool_name="find_element",
+                action="capture_bounding_box_screenshot",
+                interaction_type="screenshot",
+                selector=selector,
+                success=False,
+                error_message=str(e),
+                additional_data={
+                    "element_name": element_name,
+                },
+            )
+    # async def interact_with_element_select_type(self,
+    #         page:Page,
+    #         element: ElementHandle,
+    #         selector: str,
+    #         option_value: str,
+    #         properties: dict,
+    # ) -> dict[str, str]:
+    #     """
+    #     Internal function to interact with the element to select the option.
+    #     """
+    #     # page = await self.get_current_page()
+    #     tag_name = properties["tag_name"]
+    #     element_role = properties["element_role"]
+    #     element_type = properties["element_type"]
+    #     element_outer_html = properties["element_outer_html"]
+    #     alternative_selectors = properties["alternative_selectors"]
+    #     element_attributes = properties["element_attributes"]
+    #     selector_logger = properties["selector_logger"]
+    #     logger.info(f"tag name details {tag_name}")
+    #     # Strategy 1: Standard HTML select element
+    #     if tag_name == "select":
+    #         await element.select_option(value=option_value)
+    #         await page.wait_for_load_state("domcontentloaded", timeout=1000)
+    #         await selector_logger.log_selector_interaction(
+    #             tool_name="select_option",
+    #             selector=selector,
+    #             action="select",
+    #             selector_type="css" if "md=" in selector else "custom",
+    #             alternative_selectors=alternative_selectors,
+    #             element_attributes=element_attributes,
+    #             success=True,
+    #             additional_data={
+    #                 "element_type": "select",
+    #                 "selected_value": option_value,
+    #             },
+    #         )
+    #         success_msg = f"Success. Option '{option_value}' selected in the dropdown with selector '{selector}'"
+    #         return {
+    #             "summary_message": success_msg,
+    #             "detailed_message": f"{success_msg}. Outer HTML: {element_outer_html}",
+    #         }
+    #
+    #     # Strategy 2: Input elements (text, number, etc.)
+    #     elif tag_name in ["input", "button"]:
+    #         input_roles = ["combobox", "listbox", "dropdown", "spinner", "select"]
+    #         input_types = [
+    #             "number",
+    #             "range",
+    #             "combobox",
+    #             "listbox",
+    #             "dropdown",
+    #             "spinner",
+    #             "select",
+    #             "option",
+    #         ]
+    #
+    #         if element_type in input_types or element_role in input_roles:
+    #             await element.click()
+    #             try:
+    #                 await element.fill(option_value)
+    #             except Exception as e:
+    #
+    #                 # traceback.print_exc()
+    #                 logger.warning(f"Error filling input: {str(e)}, trying type instead")
+    #                 await element.type(option_value)
+    #
+    #             if "lwc" in str(element) and "placeholder" in str(element):
+    #                 logger.info("Crazy LWC element detected")
+    #                 await asyncio.sleep(0.5)
+    #                 # await press_key_combination("ArrowDown+Enter")
+    #             else:
+    #                 await element.press("Enter")
+    #
+    #             await page.wait_for_load_state("domcontentloaded", timeout=1000)
+    #
+    #             await selector_logger.log_selector_interaction(
+    #                 tool_name="select_option",
+    #                 selector=selector,
+    #                 action="input",
+    #                 selector_type="css" if "md=" in selector else "custom",
+    #                 alternative_selectors=alternative_selectors,
+    #                 element_attributes=element_attributes,
+    #                 success=True,
+    #                 additional_data={
+    #                     "element_type": "input",
+    #                     "input_type": element_type,
+    #                     "value": option_value,
+    #                 },
+    #             )
+    #             success_msg = f"Success. Value '{option_value}' set in the input with selector '{selector}'"
+    #             return {
+    #                 "summary_message": success_msg,
+    #                 "detailed_message": f"{success_msg}. Outer HTML: {element_outer_html}",
+    #             }
+    #
+    #     # Strategy 3: Generic click and select approach for all other elements
+    #     # Click to open the dropdown
+    #
+    #     logger.info(f"taking worst case scenario of selecting option for {element}, properties: {properties}")
+    #     await element.click()
+    #     await page.wait_for_timeout(300)  # Short wait for dropdown to appear
+    #
+    #     # Try to find and click the option by text content
+    #     try:
+    #         # Use a simple text-based selector that works in most cases
+    #         option_selector = f"text={option_value}"
+    #         await page.click(option_selector, timeout=2000)
+    #         await page.wait_for_load_state("domcontentloaded", timeout=1000)
+    #
+    #         await selector_logger.log_selector_interaction(
+    #             tool_name="select_option",
+    #             selector=selector,
+    #             action="click_by_text",
+    #             selector_type="css" if "md=" in selector else "custom",
+    #             alternative_selectors=alternative_selectors,
+    #             element_attributes=element_attributes,
+    #             success=True,
+    #             additional_data={
+    #                 "element_type": tag_name,
+    #                 "selected_value": option_value,
+    #                 "method": "text_content",
+    #             },
+    #         )
+    #         success_msg = f"Success. Option '{option_value}' selected by text content"
+    #         return {
+    #             "summary_message": success_msg,
+    #             "detailed_message": f"{success_msg}. Outer HTML: {element_outer_html}",
+    #         }
+    #     except Exception as e:
+    #
+    #         traceback.print_exc()
+    #         logger.debug(f"Text-based selection failed: {str(e)}")
+    #
+    #         # If all attempts fail, report failure
+    #         await selector_logger.log_selector_interaction(
+    #             tool_name="select_option",
+    #             selector=selector,
+    #             action="select",
+    #             selector_type="css" if "md=" in selector else "custom",
+    #             alternative_selectors=alternative_selectors,
+    #             element_attributes=element_attributes,
+    #             success=False,
+    #             error_message=f"Could not find option '{option_value}' in the dropdown with any selection method.",
+    #         )
+    #         error = f"Error: Option '{option_value}' not found in the element with selector '{selector}'. Try clicking the element first and then select the option."
+    #         return {"summary_message": error, "detailed_message": error}
+
+    async def interact_with_element_select_type(
+            self,
+            page: Page,
+            element: ElementHandle,
+            selector: str,  # This selector is primarily for logging purposes, not for re-locating
             option_value: str,
             properties: dict,
     ) -> dict[str, str]:
         """
         Internal function to interact with the element to select the option.
         """
-        page = await self.get_current_page()
-        tag_name = properties["tag_name"]
-        element_role = properties["element_role"]
-        element_type = properties["element_type"]
-        element_outer_html = properties["element_outer_html"]
-        alternative_selectors = properties["alternative_selectors"]
-        element_attributes = properties["element_attributes"]
-        selector_logger = properties["selector_logger"]
+        tag_name = properties.get("tag_name")
+        element_role = properties.get("element_role")
+        element_type = properties.get("element_type")
+        element_outer_html = properties.get(
+            "outer_html")  # Changed from element_outer_html to outer_html to match _get_element_and_properties
+        alternative_selectors = properties.get("alternative_selectors", [])
+        element_attributes = properties.get("element_attributes", {})
+        selector_logger = properties.get("selector_logger")
+
+        if not selector_logger:
+            logger.error("selector_logger not provided in properties. Cannot log interaction.")
+            selector_logger = get_browser_logger(get_global_conf().get_proof_path())  # Fallback
 
         # Strategy 1: Standard HTML select element
         if tag_name == "select":
-            await element.select_option(value=option_value)
-            await page.wait_for_load_state("domcontentloaded", timeout=1000)
-            await selector_logger.log_selector_interaction(
-                tool_name="select_option",
-                selector=selector,
-                action="select",
-                selector_type="css" if "md=" in selector else "custom",
-                alternative_selectors=alternative_selectors,
-                element_attributes=element_attributes,
-                success=True,
-                additional_data={
-                    "element_type": "select",
-                    "selected_value": option_value,
-                },
-            )
-            success_msg = f"Success. Option '{option_value}' selected in the dropdown with selector '{selector}'"
-            return {
-                "summary_message": success_msg,
-                "detailed_message": f"{success_msg}. Outer HTML: {element_outer_html}",
-            }
+            try:
+                await element.select_option(value=option_value)
+                await page.wait_for_load_state("domcontentloaded", timeout=1000)
+                await selector_logger.log_selector_interaction(
+                    tool_name="select_option",
+                    selector=selector,
+                    action="select",
+                    selector_type="css" if selector.startswith("#") or selector.startswith(
+                        ".") or "[" in selector else "custom",  # More robust selector type check
+                    alternative_selectors=alternative_selectors,
+                    element_attributes=element_attributes,
+                    success=True,
+                    additional_data={
+                        "element_type": "select",
+                        "selected_value": option_value,
+                    },
+                )
+                success_msg = f"Success. Option '{option_value}' selected in the dropdown with selector '{selector}'"
+                return {
+                    "summary_message": success_msg,
+                    "detailed_message": f"{success_msg}. Outer HTML: {element_outer_html}",
+                }
+            except Exception as e:
+                error_msg = f"Failed to select option '{option_value}' in standard select element '{selector}': {e}"
+                await selector_logger.log_selector_interaction(
+                    tool_name="select_option",
+                    selector=selector,
+                    action="select",
+                    selector_type="css" if selector.startswith("#") or selector.startswith(
+                        ".") or "[" in selector else "custom",
+                    alternative_selectors=alternative_selectors,
+                    element_attributes=element_attributes,
+                    success=False,
+                    error_message=error_msg,
+                )
+                logger.error(error_msg)
+                return {"summary_message": error_msg, "detailed_message": error_msg}
 
-        # Strategy 2: Input elements (text, number, etc.)
+
+        # Strategy 2: Input elements (text, number, etc.) that behave like dropdowns
         elif tag_name in ["input", "button"]:
             input_roles = ["combobox", "listbox", "dropdown", "spinner", "select"]
             input_types = [
                 "number",
                 "range",
+                # These types are usually for non-standard dropdowns
                 "combobox",
                 "listbox",
                 "dropdown",
@@ -1217,95 +2106,109 @@ class PlaywrightBrowserManager:
             ]
 
             if element_type in input_types or element_role in input_roles:
-                await element.click()
                 try:
-                    await element.fill(option_value)
+                    await element.click()
+                    try:
+                        await element.fill(option_value)
+                    except Exception as e:
+                        logger.warning(f"Error filling input: {str(e)}, trying type instead")
+                        await element.type(option_value)
+
+                    # This LWC specific logic should probably be more generic or configurable
+                    if "lwc" in str(element_outer_html) and "placeholder" in str(element_outer_html):
+                        logger.info("Potential LWC element detected, attempting ArrowDown+Enter.")
+                        await asyncio.sleep(0.5)  # Give time for dropdown to appear
+                        await self.press_key_combinationnew("ArrowDown+Enter")
+                    else:
+                        await element.press("Enter")
+
+                    await page.wait_for_load_state("domcontentloaded", timeout=1000)
+
+                    await selector_logger.log_selector_interaction(
+                        tool_name="select_option",
+                        selector=selector,
+                        action="input",
+                        selector_type="css" if selector.startswith("#") or selector.startswith(
+                            ".") or "[" in selector else "custom",
+                        alternative_selectors=alternative_selectors,
+                        element_attributes=element_attributes,
+                        success=True,
+                        additional_data={
+                            "element_type": "input",
+                            "input_type": element_type,
+                            "value": option_value,
+                        },
+                    )
+                    success_msg = f"Success. Value '{option_value}' set in the input with selector '{selector}'"
+                    return {
+                        "summary_message": success_msg,
+                        "detailed_message": f"{success_msg}. Outer HTML: {element_outer_html}",
+                    }
                 except Exception as e:
+                    error_msg = f"Failed to interact with input/button element '{selector}' (type: {element_type}, role: {element_role}): {e}"
+                    await selector_logger.log_selector_interaction(
+                        tool_name="select_option",
+                        selector=selector,
+                        action="input",
+                        selector_type="css" if selector.startswith("#") or selector.startswith(
+                            ".") or "[" in selector else "custom",
+                        alternative_selectors=alternative_selectors,
+                        element_attributes=element_attributes,
+                        success=False,
+                        error_message=error_msg,
+                    )
+                    logger.error(error_msg)
+                    return {"summary_message": error_msg, "detailed_message": error_msg}
 
-                    # traceback.print_exc()
-                    logger.warning(f"Error filling input: {str(e)}, trying type instead")
-                    await element.type(option_value)
-
-                if "lwc" in str(element) and "placeholder" in str(element):
-                    logger.info("Crazy LWC element detected")
-                    await asyncio.sleep(0.5)
-                    # await press_key_combination("ArrowDown+Enter")
-                else:
-                    await element.press("Enter")
-
-                await page.wait_for_load_state("domcontentloaded", timeout=1000)
-
-                await selector_logger.log_selector_interaction(
-                    tool_name="select_option",
-                    selector=selector,
-                    action="input",
-                    selector_type="css" if "md=" in selector else "custom",
-                    alternative_selectors=alternative_selectors,
-                    element_attributes=element_attributes,
-                    success=True,
-                    additional_data={
-                        "element_type": "input",
-                        "input_type": element_type,
-                        "value": option_value,
-                    },
-                )
-                success_msg = f"Success. Value '{option_value}' set in the input with selector '{selector}'"
-                return {
-                    "summary_message": success_msg,
-                    "detailed_message": f"{success_msg}. Outer HTML: {element_outer_html}",
-                }
-
-        # Strategy 3: Generic click and select approach for all other elements
-        # Click to open the dropdown
-
-        logger.info(f"taking worst case scenario of selecting option for {element}, properties: {properties}")
-        await element.click()
-        await page.wait_for_timeout(300)  # Short wait for dropdown to appear
-
-        # Try to find and click the option by text content
+        # Strategy 3: Generic click and select approach for all other elements (e.g., custom dropdowns built with divs/spans)
+        logger.info(f"Attempting generic click-and-select for element: {selector}, properties: {properties}")
         try:
-            # Use a simple text-based selector that works in most cases
-            option_selector = f"text={option_value}"
-            await page.click(option_selector, timeout=2000)
+            await element.click()
+            await page.wait_for_timeout(300)  # Short wait for dropdown to appear
+
+            # Try to find and click the option by text content
+            option_locator = page.get_by_text(option_value, exact=True)
+            await option_locator.click(timeout=5000)  # Increased timeout for clicking option
             await page.wait_for_load_state("domcontentloaded", timeout=1000)
 
             await selector_logger.log_selector_interaction(
                 tool_name="select_option",
                 selector=selector,
                 action="click_by_text",
-                selector_type="css" if "md=" in selector else "custom",
+                selector_type="css" if selector.startswith("#") or selector.startswith(
+                    ".") or "[" in selector else "custom",  # More robust selector type check
                 alternative_selectors=alternative_selectors,
                 element_attributes=element_attributes,
                 success=True,
                 additional_data={
                     "element_type": tag_name,
                     "selected_value": option_value,
-                    "method": "text_content",
+                    "method": "text_content_click",
                 },
             )
-            success_msg = f"Success. Option '{option_value}' selected by text content"
+            success_msg = f"Success. Option '{option_value}' selected by text content for element '{selector}'"
             return {
                 "summary_message": success_msg,
                 "detailed_message": f"{success_msg}. Outer HTML: {element_outer_html}",
             }
         except Exception as e:
-
+            error_msg = f"Could not find or click option '{option_value}' in the element '{selector}' using generic click-and-select method: {e}"
+            logger.error(error_msg)
             traceback.print_exc()
-            logger.debug(f"Text-based selection failed: {str(e)}")
 
             # If all attempts fail, report failure
             await selector_logger.log_selector_interaction(
                 tool_name="select_option",
                 selector=selector,
                 action="select",
-                selector_type="css" if "md=" in selector else "custom",
+                selector_type="css" if selector.startswith("#") or selector.startswith(
+                    ".") or "[" in selector else "custom",
                 alternative_selectors=alternative_selectors,
                 element_attributes=element_attributes,
                 success=False,
-                error_message=f"Could not find option '{option_value}' in the dropdown with any selection method.",
+                error_message=error_msg,
             )
-            error = f"Error: Option '{option_value}' not found in the element with selector '{selector}'. Try clicking the element first and then select the option."
-            return {"summary_message": error, "detailed_message": error}
+            return {"summary_message": error_msg, "detailed_message": error_msg}
 
     async def fill_field(self, selector: str, value: str) -> Dict[str, Any]:
         """Fills a text input field identified by a CSS selector with a given value."""
@@ -2699,13 +3602,13 @@ Available Test Data: $basic_test_information
         ) -> Annotated[str, "Click action result"]:
             query_selector = selector
 
-            if "md=" not in query_selector:
-                query_selector = f"[md='{query_selector}']"
+            # if "md=" not in query_selector:
+            #     query_selector = f"[md='{query_selector}']"
 
             logger.info(f'Executing ClickElement with "{query_selector}" as the selector')
 
             # Initialize PlaywrightManager and get the active browser page
-            browser_manager = self.playwright_manager()
+            browser_manager = self.playwright_manager
             page = await browser_manager.get_current_page()
             # await page.route("**/*", block_ads)
             action_on_dialog = action_on_dialog.lower() if action_on_dialog else ""
@@ -2777,7 +3680,7 @@ Available Test Data: $basic_test_information
             result = await do_click(page, query_selector, wait_before_execution, type_of_click)
 
             await asyncio.sleep(
-                get_global_conf().get_delay_time())  # sleep to allow the mutation observer to detect changes
+                1000)  # sleep to allow the mutation observer to detect changes
             unsubscribe(detect_dom_changes)
 
             await browser_manager.wait_for_load_state_if_enabled(page=page)
@@ -2803,11 +3706,11 @@ Available Test Data: $basic_test_information
                     f'Executing ClickElement with "{selector}" as the selector. Waiting for the element to be attached and visible.')
 
                 # Attempt to find the element on the main page or in iframes
-                browser_manager = self.playwright_manager()
+                browser_manager = self.playwright_manager
                 element = await browser_manager.find_element(selector, page, element_name="click")
                 if element is None:
                     # Initialize selector logger with proof path
-                    selector_logger = get_browser_logger(get_global_conf().get_proof_path())
+                    selector_logger = get_browser_loggernew(get_global_conf().get_proof_path())
                     # Log failed selector interaction
                     await selector_logger.log_selector_interaction(
                         tool_name="click",
@@ -2841,7 +3744,7 @@ Available Test Data: $basic_test_information
                 element_outer_html = await get_element_outer_html(element, page, element_tag_name)
 
                 # Initialize selector logger with proof path
-                selector_logger = get_browser_logger(get_global_conf().get_proof_path())
+                selector_logger = get_browser_loggernew(get_global_conf().get_proof_path())
                 # Get alternative selectors and element attributes for logging
                 alternative_selectors = await selector_logger.get_alternative_selectors(element, page)
                 element_attributes = await selector_logger.get_element_attributes(element)
@@ -2924,12 +3827,12 @@ Available Test Data: $basic_test_information
                 traceback.print_exc()
                 try:
                     logger.info(f'Standard click failed for "{selector}". Attempting JavaScript fallback click.')
-
+                    browser_manager = self.playwright_manager
                     msg = await browser_manager.perform_javascript_click(page, selector, type_of_click)
 
                     if msg:
                         # Initialize selector logger with proof path
-                        selector_logger = get_browser_logger(get_global_conf().get_proof_path())
+                        selector_logger = get_browser_loggernew(get_global_conf().get_proof_path())
                         # Log successful JavaScript fallback click
                         await selector_logger.log_selector_interaction(
                             tool_name="click",
@@ -2952,7 +3855,7 @@ Available Test Data: $basic_test_information
                     pass
 
                 # Initialize selector logger with proof path
-                selector_logger = get_browser_logger(get_global_conf().get_proof_path())
+                selector_logger = get_browser_loggernew(get_global_conf().get_proof_path())
                 # Log failed selector interaction
                 await selector_logger.log_selector_interaction(
                     tool_name="click",
@@ -2967,6 +3870,7 @@ Available Test Data: $basic_test_information
                 traceback.print_exc()
                 msg = f'Unable to click element with selector: "{selector}" since the selector is invalid. Proceed by retrieving DOM again.'
                 return {"summary_message": msg, "detailed_message": f"{msg}. Error: {e}"}
+
         @tool(
             agent_names=["browser_nav_agent"],
             name="bulk_enter_text",
@@ -2988,7 +3892,7 @@ Available Test Data: $basic_test_information
                 if len(entry) != 2:
                     logger.error(f"Invalid entry format: {entry}. Expected [selector, value]")
                     continue
-                result = await entertext((entry[0], entry[1]))  # Create tuple with explicit values
+                result = await self.playwright_manager.entertextnew((entry[0], entry[1]))  # Create tuple with explicit values
                 results.append({"selector": entry[0], "result": result})
 
             return results
@@ -3060,7 +3964,7 @@ Available Test Data: $basic_test_information
             except Exception as e:
 
                 traceback.print_exc()
-                selector_logger = get_browser_logger(get_global_conf().get_proof_path())
+                selector_logger = get_browser_loggernew(get_global_conf().get_proof_path())
                 await selector_logger.log_selector_interaction(
                     tool_name="select_option",
                     selector=selector,
@@ -3931,8 +4835,8 @@ Available Test Data: $basic_test_information
 
         # Register all the tools with the Assistant Agent's LLM and User Proxy Agent's execution map
         for func in [
-            openurl,  # Register the new openurl tool
-            click_element,click, fill_field, get_page_content,
+            openurl, click_element,
+            click, fill_field, get_page_content,
             take_screenshot, scroll_page,
             get_element_attribute, wait_for_selector,get_interactive_elements,
             get_page_text,bulk_select_option,bulk_enter_text,switch_to_tab
@@ -4016,11 +4920,8 @@ if __name__ == '__main__':
     6. Click on the 'Audit Services' text by text 'Audit Services'.
     7. Click on the 'Search entry level opportunities' link.
     8. Switch to tab index 1
-    9. Click on the 'Job alerts' text
-    10. Enter text "jeevan" in "FirstName" 
-    11. Enter text "gopalraju" in "LastName"
-    12. Enter text "jeevan.g1@tcs.com" in "EmailAddress"
-    13. Select "Finance" in the dropdown with selector "Category" by name
+    9. Fill "Senior Associate" in "k" name field
+    11. Select "Taxation" value from by name "[name=\"custom_fields.FieldofStudy\"]" dropdown by using "bulk_select_option"
     """
 
     browser_task_7 = """
@@ -4107,7 +5008,38 @@ if __name__ == '__main__':
     Click on finish button
     Verify message "Thank you for your order!"
     """
-    task_to_run = browser_task_16
+
+    browser_task_17 = """
+        Open @https://www.demoblaze.com/index.html
+        Click On Contact text
+        Fill random data Contact Email, Contact Name, Message
+        Click on button "Send message" text
+        """
+
+    browser_task_18 = """
+          Open @https://www.demoblaze.com/index.html
+          Click On link Monitors text
+          Click on link "Apple monitor 24" text
+          click on link "Add to cart" text
+          click on link "Cart" text
+          Click on button "Place Order" text
+          Fill random data name , country , city
+          """
+
+    browser_task_19 = """
+    Open @https://practice.expandtesting.com/shadowdom
+    Click on button "Here's a basic button example." text
+    Click on button "This button is inside a Shadow DOM." text
+    """
+
+
+    browser_task_20 = """
+    Open @https://practice.expandtesting.com/dropdown
+    Scroll down to the bottom
+    Select "Option 1" text from dropdown by id "#dropdown" by using bulk_select_option
+    """
+
+    task_to_run = browser_task_20
 
     asyncio.run(run_autogen_browser_automation(task_to_run))
 
