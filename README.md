@@ -450,7 +450,190 @@ class PlaywrightBrowserManager:
 
         return f"Key {key_combination} executed successfully"
 
+    async def perform_playwright_hover(self, element: ElementHandle, selector: str) -> None:
+        """
+        Performs a hover action on the element using Playwright's hover method.
 
+        Parameters:
+        - element: The Playwright ElementHandle instance representing the element to be hovered over.
+        - selector: The query selector string of the element.
+
+        Returns:
+        - None
+        """
+        logger.info("Performing Playwright hover on element with selector: %s", selector)
+        await element.hover(force=True, timeout=20)
+
+    # locate: None = None
+    async def do_hover(self,page: Page ,wait_before_execution: float, selector: Optional[str]=None,text: Optional[str]=None ) -> dict[str, str]:
+
+        """
+        Executes the hover action on the element with the given selector within the provided page,
+        including searching within iframes and shadow DOMs if necessary.
+
+        Parameters:
+        - page: The Playwright page instance.
+        - selector: The query selector string to identify the element for the hover action.
+        - wait_before_execution: Optional wait time in seconds before executing the hover event logic.
+
+        Returns:
+        dict[str,str] - Explanation of the outcome of this operation represented as a dictionary with 'summary_message' and 'detailed_message'.
+        """
+        # global locate
+        logger.info(
+            f'Executing HoverElement with "{selector}" as the selector. Wait time before execution: {wait_before_execution} seconds.')
+
+        # Wait before execution if specified
+        if wait_before_execution > 0:
+            await asyncio.sleep(wait_before_execution)
+
+        try:
+            logger.info(
+                f'Executing HoverElement with "{selector}" as the selector. Waiting for the element to be attached and visible.')
+
+            # Attempt to find the element on the main page or in shadow DOMs and iframes
+            # browser_manager = self.
+
+            # Get the current page
+            # page = await self.get_current_page()
+
+            # Wait for the page to load
+            await self.wait_for_load_state_if_enabled(page=page)
+
+            # Find the element
+            # if text:
+            #     locate = page.get_by_text(text, exact=True)
+            #     action_desc = f"element with text '{text}'"
+            # elif selector:
+            #     locate = page.locator(selector)
+            #     action_desc = f"element with selector '{selector}'"
+
+            element = await self.find_element(selector, page)
+            # element = await page.query_selector(locate)
+            if not element:
+                # Initialize selector logger with proof path
+                selector_logger = get_browser_loggernew(get_global_conf().get_proof_path())
+                # Log failed selector interaction
+                await selector_logger.log_selector_interaction(
+                    tool_name="hover",
+                    selector=selector,
+                    action="hover",
+                    selector_type="css" if "md=" in selector else "custom",
+                    success=False,
+                    error_message=f'Element with selector: "{selector}" not found',
+                )
+                raise ValueError(f'Element with selector: "{selector}" not found')
+
+            logger.info(f'Element with selector: "{selector}" is found. Scrolling it into view if needed.')
+            try:
+                await element.scroll_into_view_if_needed(timeout=200)
+                logger.info(
+                    f'Element with selector: "{selector}" is scrolled into view. Waiting for the element to be visible.')
+            except Exception as e:
+
+                traceback.print_exc()
+                logger.error(f"Error scrolling element into view: {e}")
+                # If scrollIntoView fails, just move on
+                pass
+
+            try:
+                await element.wait_for_element_state("visible", timeout=20)
+                logger.info(f'Element with selector: "{selector}" is visible. Hovering over the element.')
+            except Exception as e:
+
+                traceback.print_exc()
+                logger.error(f"Error waiting for element to be visible: {e}")
+                # If the element is not visible, try to hover over it anyway
+                pass
+
+            element_tag_name = await element.evaluate("element => element.tagName.toLowerCase()")
+            element_outer_html = await self.get_element_outer_html(element, page, element_tag_name)
+
+            # Initialize selector logger with proof path
+            selector_logger = get_browser_loggernew(get_global_conf().get_proof_path())
+            # Get alternative selectors and element attributes for logging
+            alternative_selectors = await selector_logger.get_alternative_selectors(element, page)
+            element_attributes = await selector_logger.get_element_attributes(element)
+
+            await self.perform_playwright_hover(element, selector)
+
+            # Wait briefly to allow any tooltips to appear
+            await asyncio.sleep(0.2)
+
+            # Capture tooltip information
+            tooltip_text = await self.get_tooltip_text(page)
+
+            # Log successful selector interaction
+            await selector_logger.log_selector_interaction(
+                tool_name="hover",
+                selector=selector,
+                action="hover",
+                selector_type="css" if "md=" in selector else "custom",
+                alternative_selectors=alternative_selectors,
+                element_attributes=element_attributes,
+                success=True,
+                additional_data={"tooltip_text": tooltip_text} if tooltip_text else None,
+            )
+
+            msg = f'Executed hover action on element with selector: "{selector}".'
+            if tooltip_text:
+                msg += f' Tooltip shown: "{tooltip_text}".'
+
+            return {
+                "summary_message": msg,
+                "detailed_message": f"{msg} The hovered element's outer HTML is: {element_outer_html}.",
+            }
+        except Exception as e:
+
+            traceback.print_exc()
+            # Initialize selector logger with proof path
+            selector_logger = get_browser_loggernew(get_global_conf().get_proof_path())
+            # Log failed selector interaction
+            await selector_logger.log_selector_interaction(
+                tool_name="hover",
+                selector=selector,
+                action="hover",
+                selector_type="css" if "md=" in selector else "custom",
+                success=False,
+                error_message=str(e),
+            )
+
+            logger.error(f'Unable to hover over element with selector: "{selector}". Error: {e}')
+            traceback.print_exc()
+            msg = f'Unable to hover over element with selector: "{selector}" since the selector is invalid or the element is not interactable. Consider retrieving the DOM again.'
+            return {"summary_message": msg, "detailed_message": f"{msg}. Error: {e}"}
+
+
+    async def get_tooltip_text(self,page: Page) -> str:
+        # JavaScript code to find tooltip elements
+        js_code = """
+        () => {
+            // Search for elements with role="tooltip"
+            let tooltip = document.querySelector('[role="tooltip"]');
+            if (tooltip && tooltip.innerText) {
+                return tooltip.innerText.trim();
+            }
+
+            // Search for common tooltip classes
+            let tooltipClasses = ['tooltip', 'ui-tooltip', 'tooltip-inner'];
+            for (let cls of tooltipClasses) {
+                tooltip = document.querySelector('.' + cls);
+                if (tooltip && tooltip.innerText) {
+                    return tooltip.innerText.trim();
+                }
+            }
+
+            return '';
+        }
+        """
+        try:
+            tooltip_text = await page.evaluate(js_code)
+            return tooltip_text
+        except Exception as e:
+
+            traceback.print_exc()
+            logger.error(f"Error retrieving tooltip text: {e}")
+            return ""
 
     async def custom_fill_elementnew(self,page: Page, selector: str, text_to_enter: str) -> None:
         selector = f"{selector}"  # Ensures the selector is treated as a string
@@ -1526,7 +1709,6 @@ class PlaywrightBrowserManager:
         # if "md=" not in selector:
         #     selector = f"[md='{selector}']"
 
-
         page = await self.get_current_page()
 
         if page is None:
@@ -1543,7 +1725,7 @@ class PlaywrightBrowserManager:
             dom_changes_detected = changes
 
         subscribe(detect_dom_changes)
-        await page.wait_for_load_state('networkidle', timeout=60000)
+        await page.wait_for_load_state('networkidle', timeout=10000)
         result = await self.do_select_option(page, selector, option_value)
         # Wait for page to stabilize after selection
         await self.wait_for_load_state_if_enabled(page=page)
@@ -2871,77 +3053,161 @@ class BrowserNavAgent:
     Autogen agent for browser navigation and interaction using Playwright.
     """
     agent_name: str = "browser_nav_agent"
+#     prompt = dedent("""# Web Navigation Agent
+#
+# You are a smart and specialized web navigation agent tasked with executing precise webpage interactions and retrieving information accurately using the provided browser tools.
+#
+# ## Capabilities
+# - Navigate to URLs (`openurl`).
+# - Interact with web elements (buttons, inputs, dropdowns, etc.) using selectors or visible text.
+# - Retrieve visible and relevant text content from the current page (`get_page_text`).
+# - Extract and summarize text content from web pages or specific elements.
+# - Take screenshots for visual verification.
+# - Scroll pages to bring elements into view.
+# - Get attributes from elements.
+# - Wait for elements to appear or change state.
+#
+# ## Core Rules
+#
+# ### TASK BOUNDARIES
+# 1. Execute ONLY web navigation tasks using the available tools; never attempt other types of tasks.
+# 2. Stay on the current page unless explicitly directed to navigate elsewhere.
+# 3. Focus ONLY on elements within the ACTIVE interaction plane of the UI.
+#
+# ### ELEMENT IDENTIFICATION
+#
+# **Element Identification:** When a step requires interacting with or verifying an element, use a robust strategy to locate it. Do NOT rely solely on XPath from a previous step or a single type of selector.
+#         *   **Prioritize Selectors:** Attempt to locate elements using the most reliable selectors first:
+#             *   ID (if available and unique)
+#             *   Name attribute
+#             *   CSS Selectors (preferable for readability and robustness over brittle XPaths)
+#             *   Link Text or Partial Link Text (for anchor tags)
+#             *   Button Text or Value
+#             *   XPath (use as a fallback, prioritize reliable, less brittle XPaths if possible, e.g., relative paths or paths using attributes).
+#         *   **Contextual Identification:** Use the text content, role, or other attributes mentioned or implied in the Gherkin step description to help identify the *correct* element among similar ones. For example, if the step is "When the user clicks the 'Submit' button", look for a button element containing the text "Submit".
+#         *   **Locate BEFORE Action/Verification:** Always attempt to locate the element successfully *before* performing an action (click, type) or verification on it.
+#         *   **Capture Detailed Element Information:** After locating an element but before interacting with it, use the "Get detailed element information" action to capture comprehensive details about the element including its ID, tag name, class name, XPaths (absolute and relative), and CSS selectors. This information is crucial for generating robust test scripts.
+#
+# 4. ALWAYS use precise CSS selectors or visible text for element identification.
+# 5. If you cannot identify an element or need general page content for analysis, use the `get_page_text` tool to understand the page structure better, or ask for clarification.
+#
+#
+# ### EXECUTION PROCESS
+# 6. ALWAYS analyze the page (or its content using `get_page_text`) and the task BEFORE taking any action.
+# 7. Plan and execute the optimal sequence of function/tool calls.
+# 8. Execute ONE function/tool at a time.
+# 9. Fully verify each result before proceeding to the next action.
+# 10. PERSIST until the task is FULLY COMPLETED.
+# 11. If a step fails, try to understand why from the error message and re-attempt (if possible) or report the failure.
+#
+# ### INTERACTION SPECIFICS
+# 12. Use the most appropriate tool for the interaction (e.g., `click_element` for buttons/links, `fill_field` for input boxes).
+# 13. Always provide all required parameters for tool calls. If a parameter is optional but useful, consider providing it.
+#
+# ## Response Format
+# ### Success:
+# previous_step: [previous step assigned summary]
+# current_output: [Detailed description of actions performed and outcomes, often based on tool output]
+# ##FLAG::SAVE_IN_MEM##
+# ##TERMINATE TASK##
+#
+# ### Information Request Response:
+# previous_step: [previous step assigned summary]
+# current_output: [Detailed answer with specific information extracted from the page]
+# Data: [Relevant extracted information]
+# ##TERMINATE TASK##
+#
+# ### Error or Uncertainty:
+# previous_step: [previous step assigned summary]
+# current_output: [Precise description of the issue encountered or why the task cannot be completed]
+# ##TERMINATE TASK##
+#
+# Available Test Data: $basic_test_information
+# """)
+
     prompt = dedent("""# Web Navigation Agent
 
-You are a smart and specialized web navigation agent tasked with executing precise webpage interactions and retrieving information accurately using the provided browser tools.
+    You are a smart and specialized web navigation agent tasked with executing precise webpage interactions and retrieving information accurately using the provided browser tools.
 
-## Capabilities
-- Navigate to URLs (`openurl`).
-- Interact with web elements (buttons, inputs, dropdowns, etc.) using selectors or visible text.
-- Retrieve visible and relevant text content from the current page (`get_page_text`).
-- Extract and summarize text content from web pages or specific elements.
-- Take screenshots for visual verification.
-- Scroll pages to bring elements into view.
-- Get attributes from elements.
-- Wait for elements to appear or change state.
+    ## Capabilities
+    - Navigate to URLs (`openurl`).
+    - Interact with web elements (buttons, inputs, dropdowns, hover etc.) using various locator strategies.
+    - Retrieve visible and relevant text content from the current page (`get_page_text`).
+    - Extract and summarize text content from web pages or specific elements.
+    - Take screenshots for visual verification.
+    - Scroll pages to bring elements into view.
+    - Get attributes from elements using various locator strategies.
+    - Wait for elements to appear or change state using various locator strategies.
+    - Get detailed element information using various locator strategies.
+    - Switch between open tabs in the browser (`switch_to_tab`).
+    - Select an option from a dropdown or similar interactive element (`select_option`).
 
-## Core Rules
+    ## Core Rules
 
-### TASK BOUNDARIES
-1. Execute ONLY web navigation tasks using the available tools; never attempt other types of tasks.
-2. Stay on the current page unless explicitly directed to navigate elsewhere.
-3. Focus ONLY on elements within the ACTIVE interaction plane of the UI.
+    ### TASK BOUNDARIES
+    1. Execute ONLY web navigation tasks using the available tools; never attempt other types of tasks.
+    2. Stay on the current page unless explicitly directed to navigate elsewhere.
+    3. Focus ONLY on elements within the ACTIVE interaction plane of the UI.
 
-### ELEMENT IDENTIFICATION
+    ### ELEMENT IDENTIFICATION
+    4. When a step requires interacting with or verifying an element, use a robust strategy to locate it. Do NOT rely solely on XPath from a previous step or a single type of selector.
+        * **Prioritize Selectors:** Attempt to locate elements using the most reliable selectors first. For any tool that accepts locator parameters (like 'hover',`click_element`, `fill_field`, `get_text_from_selector`, `get_element_attribute`, `wait_for_selector`, `get_detailed_element_information`, `select_option`), you can provide *one or more* of the following:
+            * `id_attr`: Use the element's unique `id` attribute (e.g., 'submitButton'). This is highly reliable.
+            * `name_attr`: Use the element's `name` attribute (e.g., 'username').
+            * `css_selector`: A standard CSS selector (e.g., 'button.submit-btn', 'input#myField'). Prefer specific, non-brittle selectors.
+            * `text`: The exact visible text content of an element, useful for links, buttons, headings, etc. (e.g., 'Login button'). This also covers "Link Text" and "Button Text or Value".
+            * `role`: The ARIA role of the element, for accessibility-driven identification (e.g., 'button', 'textbox', 'link').
+            * `test_id`: The value of the `data-testid` attribute, common in modern front-end frameworks.
+            * `placeholder`: The placeholder text of an input field.
+            * `label`: The text of a `<label>` element associated with an input.
+            * `alt_text`: The `alt` attribute text for an `<img>` element.
+            * `title_attr`: The `title` attribute text, often used for tooltips.
+            * `xpath`: An XPath expression (e.g., '//button[contains(., "Submit")]'). Use this as a **fallback** when other, more direct locators are not available or are ambiguous. Prioritize reliable, less brittle XPaths (e.g., relative paths, paths using attributes) over absolute ones.
+        * **Iframe Context:** If the element is located inside an `<iframe>`, you must also specify the iframe's location using either:
+            * `frame_css_selector`: A CSS selector for the `<iframe>` element itself (e.g., 'iframe#my-login-frame').
+            * `frame_name`: The `name` attribute of the `<iframe>` element (e.g., 'loginFrame').
+            If both `frame_css_selector` and `frame_name` are provided, `frame_css_selector` will be prioritized.
+        * **Contextual Identification:** Always use the most descriptive locator(s) based on the task. For example, if the step is "When the user clicks the 'Submit' button", `text='Submit'` is highly contextual and preferred, possibly combined with `role='button'` for robustness.
+        * **Locate BEFORE Action/Verification:** Before attempting to perform an action (like 'hover',`click_element` or `fill_field`) or verification (like `get_text_from_selector` or `wait_for_selector`), always ensure the element is locatable. If uncertain about element properties, use `get_detailed_element_information` first.
+        * **Capture Detailed Element Information:** After successfully locating an element, especially before a complex interaction or when debugging, use the `get_detailed_element_information` tool to get comprehensive details (ID, tag name, class name, attributes, etc.). This helps in building robust scripts.
 
-**Element Identification:** When a step requires interacting with or verifying an element, use a robust strategy to locate it. Do NOT rely solely on XPath from a previous step or a single type of selector.
-        *   **Prioritize Selectors:** Attempt to locate elements using the most reliable selectors first:
-            *   ID (if available and unique)
-            *   Name attribute
-            *   CSS Selectors (preferable for readability and robustness over brittle XPaths)
-            *   Link Text or Partial Link Text (for anchor tags)
-            *   Button Text or Value
-            *   XPath (use as a fallback, prioritize reliable, less brittle XPaths if possible, e.g., relative paths or paths using attributes).
-        *   **Contextual Identification:** Use the text content, role, or other attributes mentioned or implied in the Gherkin step description to help identify the *correct* element among similar ones. For example, if the step is "When the user clicks the 'Submit' button", look for a button element containing the text "Submit".
-        *   **Locate BEFORE Action/Verification:** Always attempt to locate the element successfully *before* performing an action (click, type) or verification on it.
-        *   **Capture Detailed Element Information:** After locating an element but before interacting with it, use the "Get detailed element information" action to capture comprehensive details about the element including its ID, tag name, class name, XPaths (absolute and relative), and CSS selectors. This information is crucial for generating robust test scripts.
+    ### EXECUTION PROCESS
+    6. ALWAYS analyze the page (or its content using `get_page_text` or `get_detailed_element_information`) and the task BEFORE taking any action.
+    7. Plan and execute the optimal sequence of function/tool calls.
+    8. Execute ONE function/tool at a time.
+    9. Fully verify each result before proceeding to the next action.
+    10. PERSIST until the task is FULLY COMPLETED.
+    11. If a step fails, try to understand why from the error message and re-attempt (if possible) or report the failure.
 
-4. ALWAYS use precise CSS selectors or visible text for element identification.
-5. If you cannot identify an element or need general page content for analysis, use the `get_page_text` tool to understand the page structure better, or ask for clarification.
+    ### INTERACTION SPECIFICS
+    12. Use the most appropriate tool for the interaction (e.g., `click_element` for buttons/links, `fill_field` for input boxes).
+    13. Always provide all required parameters for tool calls. If a parameter is optional but useful, consider providing it.
 
+    ## Response Format
+    You MUST respond with a valid JSON object for tool calls.
+    If the task is complete or you need to provide information, use the following format:
+    ```json
+    {
+      "previous_step": "[previous step assigned summary]",
+      "current_output": "[Detailed description of actions performed and outcomes, often based on tool output]",
+      "Data": "[Relevant extracted information]" // Only if providing information
+    }
+    {
+     "previous_step": "Attempted to use a non-existent 'hover' tool, resulting in an error. Repeatedly failed to correctly request 'get_page_text' due to incorrect output format.",
+     "current_output": "I am now correctly requesting the page text content to analyze the current state of the web page and determine the next appropriate action, given that the 'hover' tool is unavailable.",
+     "tool_code": "print(get_page_text())"
+    }
+    
+    ```
+    Followed by `##FLAG::SAVE_IN_MEM##` and `##TERMINATE TASK##` on separate lines if the task is complete.
 
-### EXECUTION PROCESS
-6. ALWAYS analyze the page (or its content using `get_page_text`) and the task BEFORE taking any action.
-7. Plan and execute the optimal sequence of function/tool calls.
-8. Execute ONE function/tool at a time.
-9. Fully verify each result before proceeding to the next action.
-10. PERSIST until the task is FULLY COMPLETED.
-11. If a step fails, try to understand why from the error message and re-attempt (if possible) or report the failure.
+    ### Example of a tool call:
+    ```python
+    print(openurl(url='[https://www.example.com](https://www.example.com)'))
+    ```
+    Available Test Data: $basic_test_information
+    """)
 
-### INTERACTION SPECIFICS
-12. Use the most appropriate tool for the interaction (e.g., `click_element` for buttons/links, `fill_field` for input boxes).
-13. Always provide all required parameters for tool calls. If a parameter is optional but useful, consider providing it.
-
-## Response Format
-### Success:
-previous_step: [previous step assigned summary]
-current_output: [Detailed description of actions performed and outcomes, often based on tool output]
-##FLAG::SAVE_IN_MEM##
-##TERMINATE TASK##
-
-### Information Request Response:
-previous_step: [previous step assigned summary]
-current_output: [Detailed answer with specific information extracted from the page]
-Data: [Relevant extracted information]
-##TERMINATE TASK##
-
-### Error or Uncertainty:
-previous_step: [previous step assigned summary]
-current_output: [Precise description of the issue encountered or why the task cannot be completed]
-##TERMINATE TASK##
-
-Available Test Data: $basic_test_information
-""")
 
     def __init__(self
                  , model_config_list: list
@@ -3117,6 +3383,56 @@ Available Test Data: $basic_test_information
             str, "JSON string indicating success and message."]:
             result = await self.playwright_manager.click_element(selector=selector, text=text)
             return json.dumps(result, separators=(",", ":")).replace('"', "'")
+
+        @tool(
+            agent_names=["browser_nav_agent"],
+            description="""Hovers over element. Returns tooltip details.""",
+            name="hover",
+        )
+        async def hover(
+                # selector: Annotated[str, "selector using md attribute, just give the md ID value"],
+                selector: Annotated[
+                    Optional[str], "CSS selector of the element"] = None,
+                text: Annotated[
+                    Optional[str], "Exact visible text of the element"] = None,
+                wait_before_execution: Annotated[float, "Wait time in seconds before hover"] = 0.0,
+        ) -> Annotated[str, "Result of hover action with tooltip text"]:
+            logger.info(f'Executing HoverElement with "{selector}" as the selector')
+            # if "md=" not in selector:
+            #     selector = f"[md='{selector}']"
+
+            browser_manager = self.playwright_manager
+            page = await browser_manager.get_current_page()
+
+            if page is None:  # type: ignore
+                raise ValueError("No active page found. OpenURL command opens a new page.")
+
+            function_name = inspect.currentframe().f_code.co_name  # type: ignore
+
+            await browser_manager.take_screenshots(f"{function_name}_start", page)
+
+            # await browser_manager.highlight_element(selector)
+
+            dom_changes_detected = None
+
+            def detect_dom_changes(changes: str):  # type: ignore
+                nonlocal dom_changes_detected
+                dom_changes_detected = changes  # type: ignore
+
+            subscribe(detect_dom_changes)
+            result = await self.playwright_manager.do_hover(page, wait_before_execution,selector,text)
+            await asyncio.sleep(
+                300)  # sleep to allow the mutation observer to detect changes
+            unsubscribe(detect_dom_changes)
+
+            await browser_manager.wait_for_load_state_if_enabled(page=page)
+
+            await browser_manager.take_screenshots(f"{function_name}_end", page)
+
+            if dom_changes_detected:
+                return f"Success: {result['summary_message']}.\nAs a consequence of this action, new elements have appeared in view: {dom_changes_detected}. You may need further interaction. Get all_fields DOM to complete the interaction, if needed, also the tooltip data is already in the message"
+            return result["detailed_message"]
+
 
         @tool(agent_names=[self._agent_name], name="switch_to_tab",
               description="Switch to a specific tab by index. Tab indices start from 0.")
@@ -4873,13 +5189,70 @@ Available Test Data: $basic_test_information
             click, fill_field, get_page_content,
             take_screenshot, scroll_page,
             get_element_attribute, wait_for_selector,get_interactive_elements,
-            get_page_text,bulk_select_option,bulk_enter_text,switch_to_tab
+            get_page_text,bulk_select_option,bulk_enter_text,switch_to_tab,hover
         ]:
             tool_metadata = func.__tool_metadata__
             self.agent.register_for_llm(name=tool_metadata["name"], description=tool_metadata["description"])(func)
             self.nav_executor.register_for_execution(name=tool_metadata["name"])(func)
             logger.info(f"Registered tool: {tool_metadata['name']}")
 
+
+# Assuming LLM_PROMPTS is defined as in your input
+LLM_PROMPTS = {
+    "USER_AGENT_PROMPT": """A proxy for the user for executing the user commands.""",
+    "BROWSER_NAV_EXECUTOR_PROMPT": """A proxy for the user for executing the user commands.""",
+    "PLANNER_CRITIC_AGENT_PROMPT": """# Test Automation Task Critic
+    You cannot give positive feedback - respond with "no feedback" for positive cases. You are a software test automation task critic that:
+    - Corrects planner actions
+    - Answers planner queries
+    - Provides unbiased feedback
+    - Stays within task scope
+    - Gives deterministic answers
+    Restrictions:
+    - No web page actions
+    - No API operations
+    - No database operations
+    - Only feedback and query responses
+    - Must stay within user task limits""",
+    "VERIFICATION_AGENT": """# Task Verification Agent
+    Given a conversation and task:
+    1. Analyze conversation thoroughly
+    2. Determine task completion status
+    3. Identify incomplete elements
+    4. Suggest next steps for completion""",
+    "GO_BACK_PROMPT": """Navigates to previous page in browser history. Returns full URL after navigation.""",
+    "COMMAND_EXECUTION_PROMPT": """Execute the USER TESTING TASK INSTRUCTIONS: "$command" \nCURRENT STATE:$current_url_prompt_segment""",
+    "GET_DOM_WITHOUT_CONTENT_TYPE_PROMPT": """Retrieves current page DOM with injected "md" attributes for interaction. Returns minified HTML.""",
+    "GET_ACCESSIBILITY_TREE": """Retrieves accessibility tree with elements in display order.""",
+    "CLICK_PROMPT_ACCESSIBILITY": """Clicks element by name and role. Returns success/failure status.""",
+    "CLICK_BY_TEXT_PROMPT": """Clicks all elements matching text. Use as last resort.""",
+    "ADD_TO_MEMORY_PROMPT": """Saves information for later use (tasks, preferences, URLs, etc.).""",
+    "GET_MEMORY_PROMPT": """Retrieves all stored memory information.""",
+    "PRESS_ENTER_KEY_PROMPT": """Presses Enter in specified field. Optimal for text inputs.""",
+    "BROWSER_AGENT_NO_TOOLS_PROMPT": """You are an autonomous agent tasked with performing web navigation on a Playwright instance, including logging into websites and executing other web-based actions.
+    You will receive user commands, formulate a plan and then write the PYTHON code that is needed for the task to be completed.
+    It is possible that the code you are writing is for one step at a time in the plan. This will ensure proper execution of the task.
+    Your operations must be precise and efficient, adhering to the guidelines provided below:
+    1. Asynchronous Code Execution: Your tasks will often be asynchronous in nature, requiring careful handling. Wrap asynchronous operations within an appropriate async structure to ensure smooth execution.
+    2. Sequential Task Execution: To avoid issues related to navigation timing, execute your actions in a sequential order. This method ensures that each step is completed before the next one begins, maintaining the integrity of your workflow. Some steps like navigating to a site will require a small amount of wait time after them to ensure they load correctly.
+    3. Error Handling and Debugging: Implement error handling to manage exceptions gracefully. Should an error occur or if the task doesn't complete as expected, review your code, adjust as necessary, and retry. Use the console or logging for debugging purposes to track the progress and issues.
+    4. Using HTML DOM: Do not assume what a DOM selector (web elements) might be. Rather, fetch the DOM to look for the selectors or fetch DOM inner text to answer a questions. This is crucial for accurate task execution. When you fetch the DOM, reason about its content to determine appropriate selectors or text that should be extracted. To fetch the DOM using playwright you can:
+    - Fetch entire DOM using page.content() method. In the fetched DOM, consider if appropriate to remove entire sections of the DOM like `script`, `link` elements
+    - Fetch DOM inner text only text_content = await page.evaluate("() => document.body.innerText || document.documentElement.innerText"). This is useful for information retrieval.
+    5. DOM Handling: Never ever substring the extracted HTML DOM. You can remove entire sections/elements of the DOM like `script`, `link` elements if they are not needed for the task. This is crucial for accurate task execution.
+    6. Execution Verification: After executing the user the given code, ensure that you verify the completion of the task. If the task is not completed, revise your plan then rewrite the code for that step.
+    7. Termination Protocol: Once a task is verified as complete or if it's determined that further attempts are unlikely to succeed, conclude the operation and respond with `##TERMINATE##`, to indicate the end of the session. This signal should only be used when the task is fully completed or if there's a consensus that continuation is futile.
+    8. Code Modification and Retry Strategy: If your initial code doesn't achieve the desired outcome, revise your approach based on the insights gained during the process. When DOM selectors you are using fail, fetch the DOM and reason about it to discover the right selectors.If there are timeouts, adjust increase times. Add other error handling mechanisms before retrying as needed.
+    9. Code Generation: Generated code does not need documentation or usage examples. Assume that it is being executed by an autonomous agent acting on behalf of the user. Do not add placeholders in the code.
+    10. Browser Handling: Do not user headless mode with playwright. Do not close the browser after every step or even after task completion. Leave it open.
+    11. Reponse: Remember that you are communicating with an autonomous agent that does not reason. All it does is execute code. Only respond with code that it can execute unless you are terminating.
+    12. Playwrite Oddities: There are certain things that Playwright does not do well:
+    - page.wait_for_selector: When providing a timeout value, it will almost always timeout. Put that call in a try/except block and catch the timeout. If timeout occurs just move to the next statement in the code and most likely it will work. For example, if next statement is page.fill, just execute it.
+
+
+    By following these guidelines, you will enhance the efficiency, reliability, and user interaction of your web navigation tasks.
+    Always aim for clear, concise, and well-structured code that aligns with best practices in asynchronous programming and web automation.""",
+}
 
 # --- Main Execution Workflow ---
 async def run_autogen_browser_automation(user_task: str):
@@ -4906,6 +5279,7 @@ async def run_autogen_browser_automation(user_task: str):
         llm_config_params={"temperature": 0.1},
         nav_executor=browser_executor,
         playwright_manager=playwright_manager,  # Pass the Playwright manager instance
+        system_prompt=LLM_PROMPTS["BROWSER_AGENT_NO_TOOLS_PROMPT"],
     )
     browser_assistant = browser_assistant_instance.get_agent_instance()
 
@@ -4954,10 +5328,16 @@ if __name__ == '__main__':
     6. Click on the 'Audit Services' text by text 'Audit Services'.
     7. Click on the 'Search entry level opportunities' link.
     8. Switch to tab index 1
-    9. Enter text "Senior Associate" in text box by name "select[name='k']" using "bulk_enter_text"
-    10. Verify text "Search jobs" on the page
-    11. Wait for selector by name "custom_fields.FieldofStudy"
-    12. Select text "Austin" from by name "select[name='City']" by using "bulk_select_option"
+    9. Waits for an element matching the selector "[name=\"State\"]" to satisfy a state "visible" condition.
+    10. Fill "Senior Associate" in "k" name field
+    10. Waits for an element matching the selector "[name=\"City\"]" to satisfy a state "visible" condition.
+    10. Waits for an element matching the selector "[name=\"custom_fields.FieldofStudy\"]" to satisfy a state "visible" condition.
+    11. Verify text "Search jobs" on the page
+    11. Select text "New York" from dropdown by selector "[name=\"State\"]" and Select text "New York" from dropdown by selector "[name=\"City\"]" and Select text "Accounting" from dropdown by selector "[name=\"custom_fields.FieldofStudy\"]" by using "bulk_select_option"
+    14. Click on button by class "advanced-search-form__submit-btn"
+    15. Scroll down 1000 pixels
+    15. Verify text "New York, NY" is present on the page by class "job-location"
+    
     """
 
     browser_task_7 = """
@@ -5099,7 +5479,25 @@ if __name__ == '__main__':
         Verify "Xbox Wireless Controller" text on the page
         """
 
-    task_to_run = browser_task_14
+    browser_task_24= """
+    open @https://calendly.com/zerostep-test/test-calendly
+    Verify that a calendar is displayed
+    Dismiss the privacy modal
+    Click on the first day in the month with times available
+    Click on the first available time in the sidebar
+    Click the Next button
+    Fill out the form with realistic values
+    Submit the form
+    """
+
+
+    browser_task_23 = """
+      open @https://www.apple.com/
+      the user hover on "[aria-label=\"Store\"]".
+      Click on link "Shop the Latest" text
+    """
+
+    task_to_run = browser_task_23
 
     asyncio.run(run_autogen_browser_automation(task_to_run))
 
